@@ -164,6 +164,14 @@
 #define k_argdesc_(aw, fm, ni, nf, nres, f)  (((aw) >= 4095 ? 4095 : (aw)) | (f) | \
         (((unsigned32)ni)<<20) | (((unsigned32)nf)<<16) | ((nres)<<12))
 #else  /* TARGET_FP_ARGS in integer registers only                     */
+/* Targets whose calling standard treats some kinds of result specially */
+/* (e.g. i386: floats in x87 st(0), and the callee pops the pointer to  */
+/* a struct result) are told the kind of result by these bits.          */
+#ifdef TARGET_FLAGS_CALL_RESULTS
+#define K_FLTRESULT     0x00100000L /* result is float                  */
+#define K_DBLRESULT     0x00200000L /* result is double                 */
+#define K_STRUCTRESULT  0x00400000L /* result is a struct, in memory    */
+#endif
 # define k_fltregs_(n) 0
 #define k_argisfp_(n,i) 0
 #define k_argregs_(n) (k_argwords_(n) < NARGREGS ? k_argwords_(n) : NARGREGS)

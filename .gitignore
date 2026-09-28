@@ -13,3 +13,6 @@ xcshareddata
 xcuserdata
 project.xcworkspace
 project.pbxproj
+
+# Runtime libraries built by "make runtime"
+/lib/ncc-rt-*.a

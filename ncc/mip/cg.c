@@ -2278,6 +2278,14 @@ static void cg_fnap_1(AEop op, Expr *fn, TypeExpr *fnt,
 #endif
 
     {   Expr *temp;
+#ifdef TARGET_FLAGS_CALL_RESULTS
+        /* From the type, not resreg, which is GAP if the result is unused */
+        if (argstruct->resultrep == MCR_SORT_FLOATING+4) argdesc |= K_FLTRESULT;
+        if (argstruct->resultrep == MCR_SORT_FLOATING+8) argdesc |= K_DBLRESULT;
+        if ((op == s_fnapstruct || op == s_fnapstructvoid) &&
+            !returnsstructinregs_t(fnt))
+            argdesc |= K_STRUCTRESULT;
+#endif
         if (vregsort(resreg) == DBLREG && (fnflags & f_resultinintregs))
         {   /* returning fp result in integer registers (using hardfp) */
             resreg = R_A1;
@@ -2460,7 +2468,23 @@ static VRegnum cg_fnap(Expr *x, VRegnum resreg, bool valneeded)
                     else
                         emitreg(J_MOVDR, resultr, GAP, resreg);
                 } else
+                {
+#ifdef TARGET_CALLER_EXTENDS_NARROW_RESULTS
+/* The callee may leave the unused bits of a char or short result       */
+/* undefined (e.g. i386 System V), so we must extend it here.            */
+                    int32 rep = argstruct.resultrep;
+                    int32 size = rep & MCR_SIZE_MASK;
+                    if (size < 4 && size > 0 &&
+                        (rep & MCR_SORT_MASK) != MCR_SORT_STRUCT)
+                    {   if ((rep & MCR_SORT_MASK) == MCR_SORT_SIGNED)
+                            emit(J_EXTEND, resultr, resreg, size == 1 ? 1 : 2);
+                        else
+                            emit(J_ANDK, resultr, resreg, lowerbits(8*size));
+                    }
+                    else
+#endif
                     emitreg(J_MOVR, resultr, GAP, resreg);
+                }
             }
         }
         stash_temps(regstosave, fpregstosave, things_to_bind,
@@ -4733,6 +4757,9 @@ static VRegnum open_compilable(Expr **xp, RegSort rsort, bool valneeded)
         return cg_fnap(mk_expr2(s_fnap, te_uint, sim.udivfn, (Expr *)exprfnargs_(x)),
                        R_A1+1, YES);
 #endif
+#if NRESULTREGS >= 4
+/* Similarly, the long long divide functions return the remainder too,   */
+/* in the third and fourth result registers.                             */
     if (fname == sim.llsrem && narg == 3)
         return cg_fnap(mk_expr2(h0_(x), te_llint, ptrtofn_(sim.llsdiv), (Expr *)exprfnargs_(x)),
                        R_A1+2, YES);
@@ -4745,6 +4772,7 @@ static VRegnum open_compilable(Expr **xp, RegSort rsort, bool valneeded)
     else if (fname == sim.llurrem && narg == 3)
         return cg_fnap(mk_expr2(h0_(x), te_ullint, ptrtofn_(sim.llurdv), (Expr *)exprfnargs_(x)),
                        R_A1+2, YES);
+#endif
 
     if (bindsym_(exb_(fname)) == sim.strcpysym) {
       if (narg == 2 && h0_(a2) == s_string) {         /* isstring_()? */
@@ -6414,6 +6442,7 @@ void cg_topdecl(TopDecl *x, FileLine fl)
             resrep = mcrepoftype(restype);
             currentfunction.nresultregs = 0;
             currentfunction.baseresultreg = GAP;
+            currentfunction.resultrep = resrep;
             result_variable = NULL;
             if ((resrep & MCR_SORT_MASK) == MCR_SORT_STRUCT)
             {

@@ -1489,7 +1489,12 @@ void flt_report_error(int failure) {
     switch (failure) {
     default:               syserr("flt_report_error");
     case flt_very_small:   cc_warn(fp_rerr_very_small); break;
+#ifdef OVERLARGE_FP_CONSTANTS_ARE_INFINITE
+    /* e.g. glibc defines HUGE_VAL as 1e10000 for non-GNU compilers.    */
+    case flt_very_big:     cc_warn(fp_err_very_big); break;
+#else
     case flt_very_big:     cc_rerr(fp_err_very_big); break;
+#endif
     case flt_big_single:   cc_rerr(fp_err_big_single); break;
     case flt_small_single: cc_warn(fp_rerr_small_single); break;
     }

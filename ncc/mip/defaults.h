@@ -101,6 +101,11 @@
 #ifndef R_FP1
 #  define R_FP1 R_FA1
 #endif
+/* The number of registers (from R_A1result) a __value_in_regs struct   */
+/* result may occupy.                                                    */
+#ifndef NRESULTREGS
+#  define NRESULTREGS NARGREGS
+#endif
 /* R_A1result and R_P1result similarly give names for the result reg.   */
 #ifndef R_A1result
 #  define R_A1result R_A1

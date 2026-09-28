@@ -976,7 +976,8 @@ case s_identifier:
         if (pp_inhashif)
         {   /* the following warning is a good idea - consider:
                enum foo { a,b }; #if a==b ... */
-            cc_warn(syn_warn_hashif_undef, symname_(curlex.a1.sv));
+            if (!SuppressDB_Has(Suppress_PPUndefInIf))
+                cc_warn(syn_warn_hashif_undef, symname_(curlex.a1.sv));
                 /* @@@ - LDS 11-Nov-92: why the @@@? */
             nextsym();
             a = lit_zero;

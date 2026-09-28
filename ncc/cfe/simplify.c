@@ -2017,7 +2017,7 @@ bool returnsstructinregs_t(TypeExpr *t) {
     restype = prunetype(typearg_(t));
     if (typefnaux_(t).flags & bitoffnaux_(s_structreg)) {
         int32 resultwords = sizeoftype(restype) / MEMCPYQUANTUM;
-        return (resultwords >= 1 && resultwords <= NARGREGS);
+        return (resultwords >= 1 && resultwords <= NRESULTREGS);
     } else {
 #ifdef SOFTWARE_FLOATING_POINT_RETURNS_DOUBLES_IN_REGISTERS
         if (software_doubles_enabled && isprimtype_(restype, s_double))

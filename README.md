@@ -10,12 +10,18 @@ encouraged to have their own version numbering.
 Code is emitted in AOF files and supports several targets: ARM's generic 32-bit
 development platform, RISC OS (32-bit and 26-bit), and Apple Newton (untested).
 
+There is also an experimental i386 Linux target, which emits GNU assembler
+source and uses the system's assembler, linker and C library.
+
 ## Contents
 
 - **`ncc/`** — the compiler source code.
 
 - **`ncc-support/`** — newly recreated support code and glue. These files will
   be replaced with original equivalents as they are located.
+
+- **`runtime/`** - runtime support libraries for targets that need them, built
+  by the compiler itself.
 
 - **`tests/`** - simple test suite that can check compilation of tests in
   various ways - assembler output or assertions that the test's syntax
@@ -51,6 +57,13 @@ Where:
 - `HOST=riscos` first compiles a compiler for the current host (ncc-riscos),
    and uses that to build a native RISC OS executable (`ncc,ff8`).
 
+`TARGET=i386` builds `bin/ncc-i386`, a cross compiler for i386 Linux. It needs
+the system's 32-bit development files (e.g. Debian's `gcc-multilib`) to link,
+and its runtime library, which it links in automatically once built with:
+```
+make runtime TARGET=i386
+```
+
 ### Examples:
 Cross-compiler for targeting 26-bit RISC OS 3 or 4. Builds `bin/ncc-riscos26`:
 ```
@@ -69,6 +82,13 @@ make all        # ncc & n++
 make clean
 make distclean
 ```
+
+### Tests
+```
+./runtests.py                    # ARM tests, using bin/ncc-riscos
+./runtests.py --cc bin/ncc-i386 --features i386,i386-run tests/i386
+```
+Drop `i386-run` to run only the tests that don't need to link.
 
 ## Notes
 `TARGET=riscos` produces code for RISC OS 5 with unaligned loads disabled

@@ -79,8 +79,8 @@ typedef struct {
   LabelNumber *exitlabel;
   BindList *env;
   int nresults;
-  VRegnum resultregs[NARGREGS],
-          newresultregs[NARGREGS];
+  VRegnum resultregs[NRESULTREGS],
+          newresultregs[NRESULTREGS];
   Inline_ArgSubstList *argreplace;
 } Inline_RestoreControl;
 

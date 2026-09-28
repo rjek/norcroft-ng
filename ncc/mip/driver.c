@@ -1030,7 +1030,8 @@ case LANG_EXTN:
               }
 #ifdef NO_OBJECT_OUTPUT2                /* @@@ '2' is a temp hack       */
 #ifndef HOST_CANNOT_INVOKE_ASSEMBLER
-              if (!(flags & (KEY_PREPROCESS|KEY_MAKEFILE|KEY_ASM_OUT)))
+              if (!(flags & (KEY_PREPROCESS|KEY_MAKEFILE|KEY_ASM_OUT)) &&
+                  toolenv_lookup(t, ".pp_only") == NULL)    /* -E */
               {   if (assembler(t, out_name, out_file) != 0)
                   {   main_error_count++;
                       remove(out_file);
@@ -2087,6 +2088,14 @@ static void FinishedOptions(ToolEnv *t) {
 #  endif
 #endif
       AddInclude(t, "-I.", path);
+#ifdef DRIVER_EXTRA_INCLUDES
+      /* Further system directories, searched after 'path'.             */
+      {   static char const * const extra[] = DRIVER_EXTRA_INCLUDES;
+          Uint i;
+          for (i = 0; i < sizeof(extra)/sizeof(extra[0]); i++)
+              AddInclude(t, "-I.", extra[i]);
+      }
+#endif
   }
 
   /* If compiling on Unix and in Ansi mode add extra libraries. */

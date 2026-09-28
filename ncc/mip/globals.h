@@ -290,6 +290,7 @@ typedef struct CurrentFnDetails {
     Binder *structresult;
     VRegnum baseresultreg;
     int nresultregs;
+    int32 resultrep;          /* mcrep of the result type, 0 if void */
     int32 flags, auxflags;
     int32 maxstack;
     int32 maxargsize;

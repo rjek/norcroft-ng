@@ -1223,10 +1223,15 @@ extern int ccom(ToolEnv *t, char const *infile, char const *outfile,
   set_compile_options(t);
   mcdep_set_options(t);
 
+#ifdef NO_OBJECT_OUTPUT2
+  /* The driver assembles our output itself for "-c" (see driver.c).    */
+  asmfile = outfile;
+#else
   if (toolenv_lookup(t, ".asm_out") != NULL)
     asmfile = outfile;
   else
     objectfile = outfile;
+#endif
 
   if (StrEq(infile, "-"))
   { /* then just leave as stdin */

@@ -46,6 +46,10 @@ SUPPRESS(MPWCompatible)
 SUPPRESS(Cast)                  // Implicit casting of ptr A to ptr B where A != B
 SUPPRESS(Linkage)               // ECN - Suppress errors about static/extern linkage disagreements
 
+// Preprocessor warning: undefined macro in #if.  Last, so the others
+// keep their numbers.
+SUPPRESS(PPUndefInIf)
+
 // Pascal
 // This was in the original globals.h. In the currently available code,
 // Suppress_AssignTest (aka D_ASSIGNTEST) is only used in the C front-end, so
