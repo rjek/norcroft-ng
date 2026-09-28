@@ -4691,7 +4691,9 @@ static int32 LengthOfString(String *p) {
     for ( ; s != NULL ; s = s->strsegcdr) {
       size_t l = (size_t)s->strseglen;
       if (l > 0) {
-        size_t l1 = strlen(s->strsegbase);
+        /* A segment need not be NUL terminated.                          */
+        size_t l1 = 0;
+        while (l1 < l && s->strsegbase[l1] != 0) l1++;
         if (l1 < l) {
           n += l1;
           break;

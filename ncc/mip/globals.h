@@ -325,6 +325,7 @@ Int64Con *mkint64const(SET_BITMAP m, int64 const *i64);
 extern FloatCon *real_of_string(const char *s, int32 flag);
 extern FloatCon *real_to_real(FloatCon *fc, SET_BITMAP m);
 extern FloatCon *int_to_real(int32 n, int32 u, SET_BITMAP m);
+extern FloatCon *int64_to_real(int64 const *n, int32 u, SET_BITMAP m);
 
 extern int32 length(List const *l);
 extern List *dreverse(List *x);

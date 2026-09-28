@@ -1530,8 +1530,8 @@ static bool HandleArg(ToolEnv *t, char const *current, char const *nextarg, bool
               break;
 
   case 'L':   if (Compiling_On_Unix)
-              {   if (current[1] == 'l')
-                      AddInclude(t, "-L.", &current[2]);
+              {   if (current[1] == 'l')        /* -lfoo, kept as is for ld */
+                      AddInclude(t, "-L.", current);
                   else
                       AddArg(&ld_arg, current);
               }

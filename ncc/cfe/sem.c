@@ -2723,7 +2723,9 @@ static Expr *trycastreduce(Expr *a, TypeExpr *tc, Expr *c, bool explicit)
     unsigned32 n, r;
     SET_BITMAP m, ta;
     if (h0_(a) == s_integer) {
-      ta = typespecmap_(princtype(type_(a)));
+      TypeExpr *t = princtype(type_(a));
+      /* (A null pointer constant, or a pointer made from an integer.)  */
+      ta = h0_(t) == s_typespec ? typespecmap_(t) : addrsignmap_;
       n = intval_(a);
     } else {
       ta = int64map_(a);
@@ -2767,9 +2769,13 @@ case s_typespec:
             /* remember (double)(-1u) != (double)(-1) ... */
 /* Use int_to_real() rather than flt_itod() or flt_utod() since it fills */
 /* in a string with the number etc etc etc.                              */
-            if (ta & ARITHTYPEBITS)
+            if (ta & ARITHTYPEBITS) {
+                if (h0_(a) == s_int64con)
+                    return mkinvisible(tc, c, (Expr *)int64_to_real(
+                        &int64val_(a).i, ta & bitoftype_(s_unsigned), m));
                 return mkinvisible(tc, c, (Expr *)int_to_real(
                     n, ta & bitoftype_(s_unsigned), m));
+            }
             /* drop through */
             default: return c;     /* always harmless to return cast */
         }

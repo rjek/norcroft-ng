@@ -2870,7 +2870,14 @@ static RegValue *ExportedR2Val(RegValue *exportedr, BlockHead *bfrom, CmpRec *cm
       exportedr = RegValue_CopyList(exportedr);
     if (((blkflags_(bto) & BLK2EXIT) && blklength_(bto) <= 1)
         || (cmp_mask_(cmpk) != Q_AL && (blkflags_(bfrom) & BLKREXPORTED))) {
-      RegValue *p = RegValueForReg(cmp_r2_(cmpk));
+      VRegnum r = cmp_r2_(cmpk);
+      RegValue *p;
+      /* With no compare here, the useful register is the one the       */
+      /* destination compares.                                          */
+      if (cmp_mask_(cmpk) == Q_AL && blklength_(bto) == 1 &&
+          is_compare(blkcode_(bto)[0].op & J_TABLE_BITS))
+        r = blkcode_(bto)[0].r2.r;
+      p = RegValueForReg(r);
       if (p == NULL)
         return exportedr;
       else {
@@ -3328,6 +3335,10 @@ static void cse_scanblock(BlockHead *block)
   int callcount = 0;
   bool istop = block == top_block;
   cmpk.mask = Q_AL;
+  cmpk.r2 = GAP;                /* read by ExportedR2Val() regardless */
+  cmpk.r2vals = NULL;
+  cmpk.m = 0;
+  cmpk.cmpex = NULL;
   setnotused = NULL;
   storeaccesses = NULL;
   cse_currentblock = block;
