@@ -2357,8 +2357,10 @@ static BindList *ModifyCode(void)
                         blk_pred_(next1) = mk_CSEBlockList(NULL, prev);
                         blk_pred_(after) = mk_CSEBlockList(mk_CSEBlockList(NULL, next), next1);
                     }
-#ifdef TARGET_ALLOWS_COMPARE_CSES
+                    /* The original successors of b now follow the last */
+                    /* of the new blocks.                               */
                     prev = bv[n-1];
+#ifdef TARGET_ALLOWS_COMPARE_CSES
                     /* If the expression setting the condition for the  */
                     /* last lifted ternary is also the expression       */
                     /* setting the condition for the block it's being   */

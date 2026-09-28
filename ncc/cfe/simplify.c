@@ -836,12 +836,11 @@ static Expr *OptimiseComparePair(CompKDesc const *k1, CompKDesc const *k2) {
       op = k2->op;
       high = k2->n;
     }
-  } else if (k1->op == s_less || k1->op == s_lessequal) {
+  } else if ((k1->op == s_less || k1->op == s_lessequal) &&
+             k2->op == s_greaterequal) {
     op = k1->op;
     high = k1->n;
-    if (k2->op == s_greaterequal) {
-      low = k2->n;
-    }
+    low = k2->n;
   }
   if (op != s_nothing) {
     int32 mcr = mcrepofexpr(k1->e);

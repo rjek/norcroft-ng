@@ -330,7 +330,7 @@ static struct EnvTable setupenv;
 
 char const Tool_Name[] = TOOLFILENAME;
 
-#ifdef COMPLING_ON_UNIX
+#ifdef COMPILING_ON_UNIX
 #  define Compiling_On_Unix 1
 #else
 #  define Compiling_On_Unix 0
@@ -2489,7 +2489,9 @@ static EnvItem const builtin_defaults[] = {
   {"-D__sizeof_long", "==" xstr(sizeof_long)},
   {"-D__sizeof_ptr", "==" xstr(sizeof_ptr)},
 
+#ifdef MIN_ALIGNMENT_CONFIGURABLE
   { "-zat", "=" xstr(alignof_toplevel_static_default) },
+#endif
 
   {NULL, NULL}
 };

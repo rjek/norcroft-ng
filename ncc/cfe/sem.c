@@ -1324,7 +1324,7 @@ case s_typespec:
         }
         break;
     }
-    cc_warn(sem_warn_format_type, t, (int)bufp, argindex, buf);
+    cc_warn(sem_warn_format_type, t, argindex, (int)bufp, buf);
 }
 
 #ifdef STRING_COMPRESSION
