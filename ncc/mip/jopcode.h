@@ -103,6 +103,24 @@
 #define J_UNSIGNED   0x08000000L /* ditto */
 #define J_ALIGNWR    J_SIGNED    /* => J_STRxx may write to J_ALIGN padding  */
 
+/*
+ * With TARGET_HAS_64BIT_INTREGS, integer registers are 64 bits and
+ * integer operations work on all 64 bits, except those marked J_W32,
+ * which only use (and only define) the bottom 32 bits of their operands.
+ * An operation whose result depends only on the bottom 32 bits of its
+ * operands (add, and, shift left, ...) may be done in 64 bits for a
+ * 32-bit type, but those that don't (compare, divide, shift right,
+ * conversion to floating point) must be J_W32.  A 32-bit value used in
+ * a 64-bit operation must first be extended with J_EXTEND (modes 3, 4).
+ * J_W32 shares a bit with J_ALIGNMENT, which is only for loads/stores.
+ * It is 0 for other targets.
+ */
+#ifdef TARGET_HAS_64BIT_INTREGS
+#  define J_W32      J_ALIGN2
+#else
+#  define J_W32      0
+#endif
+
 /* type bits (reallocate?) ... n.b. Q_UBIT shares with J_UNSIGNED */
 
 /*
@@ -147,8 +165,17 @@
 #define K_RESULTINFLAGS 0x80000000L /* returns result in flags only     */
 
 #define k_argwords_(n) ((n)&K_ARGWORDMASK)
+#ifdef TARGET_HAS_SYSV_AMD64_ABI
+/* There are at most 2 struct result registers.  The other two bits say */
+/* which of the eightbytes of the struct are passed in SSE registers.   */
+#define K_RESULTSSE0    0x00004000L
+#define K_RESULTSSE1    0x00008000L
+#define k_resultregs_(n) (((n)>>12)&3)
+#define k_setresultregs_(n, k) (((n) & (~0x00003000L)) | ((k) << 12))
+#else
 #define k_resultregs_(n) (((n)>>12)&15) /* struct result regs, 0 for function or procedure!!!! */
 #define k_setresultregs_(n, k) (((n) & (~0x0000f000L)) | ((k) << 12))
+#endif
 #define k_setflags_(n, k) (((n) & ~K_FLAGS) | (k))
 #define k_isvariadic_(n) ((n) & K_VACALL)
 #define k_ispure_(n)     ((n) & K_PURE)
@@ -290,9 +317,9 @@
 
 #ifdef TARGET_LACKS_MULDIV_LITERALS
 #  define jop_canRTOK(op) \
-   (((op) != J_MULR) && \
-    ((op) & ~(J_SIGNED+J_UNSIGNED)) != J_DIVR && \
-    ((op) & ~(J_SIGNED+J_UNSIGNED)) != J_REMR)
+   ((((op) & ~J_W32) != J_MULR) && \
+    ((op) & ~(J_SIGNED+J_UNSIGNED+J_W32)) != J_DIVR && \
+    ((op) & ~(J_SIGNED+J_UNSIGNED+J_W32)) != J_REMR)
 #else
 #ifdef TARGET_LACKS_MULTIPLY_LITERALS
 #  define jop_canRTOK(op) \
@@ -300,8 +327,8 @@
 #else
 #ifdef TARGET_LACKS_DIVIDE_LITERALS
 #  define jop_canRTOK(op) \
-   (((op) & ~(J_SIGNED+J_UNSIGNED)) != J_DIVR && \
-    ((op) & ~(J_SIGNED+J_UNSIGNED)) != J_REMR)
+   (((op) & ~(J_SIGNED+J_UNSIGNED+J_W32)) != J_DIVR && \
+    ((op) & ~(J_SIGNED+J_UNSIGNED+J_W32)) != J_REMR)
 #else
 #  define jop_canRTOK(op) 1
 #endif
@@ -729,7 +756,12 @@
            with_bits("MOVFIR", _J_SET_R1+_J_READ_R3+_J_GAP2)
 #define    J_THUNKTABLE 169L    /* compare J_CASEBRANCH                 */
            with_bits("THUNKTABLE", _J_GAP1)
-#define    J_EXTEND     170L    /* sign extend */
+#define    J_EXTEND     170L    /* sign extend r2 into r1, r3 gives the  */
+                                /* widths: 0 byte to halfword, 1 byte   */
+                                /* to word, 2 halfword to word; and     */
+                                /* with TARGET_HAS_64BIT_INTREGS 3 word */
+                                /* to doubleword, and 4 the same but    */
+                                /* zero extending.                      */
            with_bits("EXTEND", _J_SET_R1+_J_READ_R2)
 
 #define    J_RORK       171L

@@ -260,10 +260,18 @@ static Int64Con *int64_of_init(Expr *init)
       bitoftype_(s_short)|bitoftype_(s_long)|bitoftype_(s_int),
       { 0, 0}
     };
+    static Int64Con small;
     Int64Con *fval = &zero;
     if (init != 0)
     {   if (h0_(init) == s_int64con)
             fval = (Int64Con *)init;
+        else if (h0_(init) == s_integer)
+        {   /* a 64-bit value which is a sign extended 32-bit one        */
+            small = zero;
+            small.bin.i.lo = (unsigned32)intval_(init);
+            small.bin.i.hi = intval_(init) < 0 ? -1 : 0;
+            fval = &small;
+        }
         else if (LanguageIsCPlusPlus)
             dynamic_init(init, 0);
         else
@@ -500,13 +508,14 @@ case s_typespec:
                         /* these are all supposedly done as part of the
                          * enclosing struct or union.
                          */
-                    if (int_islonglong_(m)) {
+                    if (int_is64bit_(m)) {
 
                         if (einit == 0 && syn_canrdinit())
                             einit = rdinit(t,whole,0);
                         {   Int64Con *ic = int64_of_init(einit);
-                            gendcI_a(sizeof_long, ((int32 *)&ic->bin.i)[0], aligned);
-                            gendcI_a(sizeof_long, ((int32 *)&ic->bin.i)[1], aligned);
+                            /* the two 32-bit halves                        */
+                            gendcI_a(4, ((int32 *)&ic->bin.i)[0], aligned);
+                            gendcI_a(4, ((int32 *)&ic->bin.i)[1], aligned);
                         }
                         break;
                     }

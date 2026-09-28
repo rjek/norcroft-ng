@@ -190,12 +190,82 @@ bool CSE_EvalUnary_I(J_OPCODE op, int32 *resp, ExSet *ex) {
   return done;
 }
 
+#ifdef TARGET_HAS_64BIT_INTREGS
+/* An operation on 64-bit registers, on constants a and b (which stand   */
+/* for their sign extensions to 64 bits), whose exact result must also   */
+/* fit in 32 bits to be representable.                                   */
+static bool EvalBinary_I64(J_OPCODE op, int32 *resp, int32 a, int32 b)
+{   unsigned32 ua = (unsigned32)a, ub = (unsigned32)b, ur;
+    int32 res;
+    switch (op & J_TABLE_BITS) {
+    case J_EXTEND:
+        if (b == 3) { *resp = a; return YES; }          /* sign extend  */
+        if (b == 4) { *resp = a; return a >= 0; }       /* zero extend  */
+        return NO;
+    case J_ANDK: *resp = a & b; return YES;
+    case J_ORRK: *resp = a | b; return YES;
+    case J_EORK: *resp = a ^ b; return YES;
+    case J_ADDK:
+        ur = ua + ub; res = (int32)ur;
+        *resp = res;    /* overflowed iff the operands' signs agree and  */
+        return !((a < 0) == (b < 0) && (res < 0) != (a < 0));
+    case J_SUBK: case J_RSBK:
+        if ((op & J_TABLE_BITS) == J_RSBK) { int32 t = a; a = b; b = t;
+                                             ua = (unsigned32)a; ub = (unsigned32)b; }
+        ur = ua - ub; res = (int32)ur;
+        *resp = res;
+        return !((a < 0) != (b < 0) && (res < 0) != (a < 0));
+    case J_MULK:
+        if (a == 0 || b == 0) { *resp = 0; return YES; }
+        res = (int32)(ua * ub);
+        *resp = res;
+        /* exact iff dividing back gives the operand, avoiding -1 * min */
+        return !((a == -1 && b == (int32)0x80000000) ||
+                 (b == -1 && a == (int32)0x80000000)) && res / b == a;
+    case J_SHLK:
+        if (b < 0 || b >= 32) return NO;
+        res = (int32)(ua << b);
+        *resp = res;
+        return (res >> b) == a;     /* no significant bits lost          */
+    case J_SHRK:
+        if (b < 0 || b >= 64) return NO;
+        if (!(op & J_UNSIGNED)) {   /* arithmetic: stays sign extended   */
+            *resp = b >= 32 ? (a < 0 ? -1 : 0) : TARGET_RIGHTSHIFT(a, b);
+            return YES;
+        }
+        if (a < 0 && b != 0) return NO;   /* the top 32 bits are ones   */
+        *resp = b >= 32 ? 0 : (int32)(ua >> b);
+        return YES;
+    case J_DIVK: case J_REMK:
+        if (op & J_UNSIGNED) {
+            if (a < 0 || b < 0) return NO;    /* huge 64-bit values       */
+            return (op & J_TABLE_BITS) == J_DIVK ? udiv(resp, b, a) : urem(resp, b, a);
+        }
+        if (a == (int32)0x80000000 && b == -1) return NO;
+        return (op & J_TABLE_BITS) == J_DIVK ? sdiv(resp, b, a) : srem(resp, b, a);
+    }
+    return NO;
+}
+#endif
+
 bool CSE_EvalBinary_I(J_OPCODE op, int32 *resp, Exprn *ax, int32 b)
 {
     int32 a, res;
     bool done = YES;
     if (exop_(ax) != J_MOVK) return NO;
     a = e1k_(ax);
+#ifdef TARGET_HAS_64BIT_INTREGS
+    if ((op & J_TABLE_BITS) == J_EXTEND ? (b == 3 || b == 4) :
+                                          !(op & J_W32)) {
+        done = EvalBinary_I64(op, &res, a, b);
+        if (done) {
+            *resp = res;
+            if (debugging(DEBUG_CSE) && CSEDebugLevel(1))
+                cc_msg("Compile-time evaluable = %ld\n", (long int)res);
+        }
+        return done;
+    }
+#endif
     switch (op & J_TABLE_BITS) {
     case J_EXTEND:if (b == 0 || b == 1)
                       res = (a & 0x80) ? a | ~0x7f : a & 0x7f;

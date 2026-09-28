@@ -711,12 +711,16 @@ static void expand_jop_macro(const Icode *const icode)
     J_OPCODE newop;
     switch (ic.op & J_TABLE_BITS)
     {
+#ifdef TARGET_HAS_64BIT_INTREGS
+    case J_PUSHR: newop = J_STRLK+J_ALIGN8; goto converted;
+#else
     case J_PUSHR: newop = J_STRK+J_ALIGN4; goto converted;
+#endif
     case J_PUSHD: newop = J_STRDK+J_ALIGN8; goto converted;
     case J_PUSHF: newop = J_STRFK+J_ALIGN4; goto converted;
     case J_PUSHL: newop = J_STRLK+J_ALIGN8; goto converted;
     converted:
-        if ((unsigned32)ic.r3.i < 4*NARGREGS)
+        if ((unsigned32)ic.r3.i < alignof_toplevel_auto*NARGREGS)
             cc_warn(warn_untrustable, currentfunction.symstr); /* syserr() */
         else
 /* @@@ (AM) BEWARE: do not trust this code if NARGREGS>0 since          */
@@ -725,7 +729,7 @@ static void expand_jop_macro(const Icode *const icode)
         {   /* Forge a Binder sufficient for local_base/address.        */
             static Binder forgery;
             bindaddr_(&forgery) = BINDADDR_LOC |
-                                  (greatest_stackdepth - (ic.r3.i - 4*NARGREGS));
+                                  (greatest_stackdepth - (ic.r3.i - alignof_toplevel_auto*NARGREGS));
 /* @@@ "op & ~J_DEADBITS" was innocent effect of old code.  Check?!!    */
 /* Also (only TARGET_STACK_MOVES_ONCE) J_STRK gets no J_ALIGNMENT.      */
 
@@ -816,8 +820,16 @@ case J_LDRFV:case J_STRFV: case J_LDRDV:case J_STRDV:
                 syserr(syserr_remove_noop_failed);
             ic.op = loads_r1(ic.op) ?
                 J_XtoY(ic.op&~J_DEADBITS, J_LDRV, J_LDRK) :
-                J_XtoY(ic.op&~J_DEADBITS, J_STRV, J_STRK) | (ic.op&J_DEAD_R1),
+                J_XtoY(ic.op&~J_DEADBITS, J_STRV, J_STRK) | (ic.op&J_DEAD_R1);
             /* J_ALIGNMENT preserved */
+#ifdef TARGET_HAS_64BIT_INTREGS
+            /* An integer register's binder has a whole register's worth */
+            /* of stack (alignof_toplevel_auto), and may hold a 64-bit    */
+            /* value whatever its type.                                   */
+            if ((ic.op & J_TABLE_BITS) == J_LDRK ||
+                (ic.op & J_TABLE_BITS) == J_STRK)
+                ic.op = J_XtoY(ic.op & ~J_ALIGNMENT, J_LDRK, J_LDRLK) | J_ALIGN8;
+#endif
             show_mem_inst(ic.op, ic.r1.r, bb);
         }
         return;
@@ -827,8 +839,12 @@ case J_LDRV1:case J_LDRLV1:case J_LDRFV1:case J_LDRDV1:
                 syserr(syserr_remove_noop_failed2);
             if ((bindaddr_(bb) & BINDADDR_MASK)!=BINDADDR_ARG) /* DEAD? */
                 syserr(syserr_bad_bindaddr);
-            ic.op = J_XtoY(ic.op&~J_DEADBITS, J_LDRV1, J_LDRK),
+            ic.op = J_XtoY(ic.op&~J_DEADBITS, J_LDRV1, J_LDRK);
             /* J_ALIGNMENT preserved */
+#ifdef TARGET_HAS_64BIT_INTREGS
+            if ((ic.op & J_TABLE_BITS) == J_LDRK)
+                ic.op = J_XtoY(ic.op & ~J_ALIGNMENT, J_LDRK, J_LDRLK) | J_ALIGN8;
+#endif
             show_mem_inst(ic.op, ic.r1.r, bb);
         }
         return;
@@ -1925,10 +1941,10 @@ static int32 remove_noops(Icode *c, int32 len)
             /* AM, Nov89: this code is somewhat in flux.                */
             unsigned32 m = bindaddr_(bb) & ~BINDADDR_MASK;
 /* @@@ see health warning in expand_jop_macro() if NARGREGS != 0.       */
-            if (m < 4*NARGREGS)
+            if (m < alignof_toplevel_auto*NARGREGS)
                 cc_warn(warn_untrustable, currentfunction.symstr); /* syserr() */
             bindaddr_(bb) = BINDADDR_LOC |
-                                  (greatest_stackdepth - (m - 4*NARGREGS));
+                                  (greatest_stackdepth - (m - alignof_toplevel_auto*NARGREGS));
         }
     }
 

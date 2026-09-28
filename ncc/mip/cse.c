@@ -1386,7 +1386,7 @@ static Icode *StoreCSE(Icode *newic, CSEDef *def)
     VRegnum r1 = newic->r1.r;
     if (is_calln(defex_(def))) {
         int32 i, nres = exnres_(defex_(def));
-        r1 = R_A1;
+        r1 = R_A1result;
         /* Local CSE def which is a non-local ref */
         /* @@@ presumably, this should never happen now */
         /*   r2 = call->r1.r;*/

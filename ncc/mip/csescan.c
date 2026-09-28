@@ -3682,12 +3682,12 @@ static void cse_scanblock(BlockHead *block)
             { int32 nres = k_resultregs_(r2.i);
             /* We need a better way of handling the divide + remainder functions */
               if (nres > 1) {
-                if (r1.r == R_A1+1 && nres == 2) {
+                if (r1.r == R_A1result+1 && nres == 2) {
                   /* Call is of a function returning two distinct results */
                   /* - only the second is used here. (div+rem fn, this    */
                   /* is use of rem)                                       */
                   values = FindRes2CallSet(r3.b, vregsort(r1.r), r2.i, arg, c);
-                  valno = r1.r-R_A1;
+                  valno = r1.r-R_A1result;
                 } else
                   /* either the div case of the above, or a function      */
                   /* returning a single result in multiple registers.     */
@@ -3701,7 +3701,7 @@ static void cse_scanblock(BlockHead *block)
                 else {
                   values = Find2ResCallSet(&values2, r3.b, vregsort(r1.r), r2.i, arg, c);
                   nvals = 1;
-                  valno = r1.r-R_A1;
+                  valno = r1.r-R_A1result;
                 }
               } else {
                 values = FindCallSet(r3.b, vregsort(r1.r), r2.i, arg);

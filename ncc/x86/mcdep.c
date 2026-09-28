@@ -25,9 +25,23 @@ int32 pcs_flags;
 /* ---------------------------------------------------------------- */
 
 /* Internal register numbers (see target.h).                          */
+#ifdef TARGET_IS_X86_64
+#define I_EAX 6
+#define I_EDX 2
+#define I_ECX 3
+#define I_R10 7
+#define I_R11 8                 /* scratch for unsigned conversions     */
+#define I_XMM15 31
+/* A call preserves only rbx, r12-r15 (and rbp, rsp).                  */
+#define CALL_CORRUPTS (((1uL << NARGREGS) - 1) << R_A1 | \
+                       ((1uL << NTEMPREGS) - 1) << R_T1)
+#else
 #define I_EAX 0
 #define I_EDX 1
 #define I_ECX 2
+/* A call preserves only ebx, esi, edi (and ebp, esp).                 */
+#define CALL_CORRUPTS (regbit(I_EAX) | regbit(I_ECX) | regbit(I_EDX))
+#endif
 
 /*
  * Some x86 instructions use fixed registers.  gen.c moves the operands
@@ -36,7 +50,7 @@ int32 pcs_flags;
  * registers it overwrites.
  */
 void RealRegisterUse(Icode const *ic, RealRegUse *u)
-{   uint32 c_in = 0, c_out = 0, def = 0;
+{   uint32 c_in = 0, c_out = 0, def = 0, use = 0;
     switch (ic->op & J_TABLE_BITS)
     {
     case J_DIVR: case J_REMR:
@@ -45,18 +59,32 @@ void RealRegisterUse(Icode const *ic, RealRegUse *u)
     case J_SHLR: case J_SHRR:
         c_in = c_out = regbit(I_ECX);
         break;
+#ifdef TARGET_IS_X86_64
+    case J_CASEBRANCH:              /* see gen.c                        */
+        c_in = c_out = regbit(I_R10) | regbit(I_R11);
+        break;
+    case J_FLTFR: case J_FLTDR:
+        if (ic->op & J_UNSIGNED) c_in = c_out = regbit(I_R11);
+        break;
+    case J_FIXFR: case J_FIXDR:
+        if ((ic->op & (J_UNSIGNED|J_W32)) == J_UNSIGNED)
+            c_in = c_out = regbit(I_XMM15);
+        break;
+#endif
     case J_CALLK: case J_CALLR:
-        /* A call preserves only ebx, esi, edi (and ebp, esp).         */
         if (k_resultregs_(ic->r2.i) > 1)        /* e.g. edx:eax        */
-            def = ((1uL << k_resultregs_(ic->r2.i)) - 1) << R_A1;
+            def = ((1uL << k_resultregs_(ic->r2.i)) - 1) << R_A1result;
         else if (isany_realreg_(ic->r1.r))
             def = regbit(ic->r1.rr);
-        c_out = (regbit(I_EAX) | regbit(I_ECX) | regbit(I_EDX) |
-                 (((1uL << NFLTREGS) - 1) << R_F0)) & ~def;
+        c_out = (CALL_CORRUPTS | (((1uL << NFLTREGS) - 1) << R_F0)) & ~def;
+        /* The call reads its register arguments.                      */
+        use = ((1uL << (k_argregs_(ic->r2.i) - k_fltregs_(ic->r2.i))) - 1) << R_A1 |
+              ((1uL << k_fltregs_(ic->r2.i)) - 1) << R_F0;
         break;
     }
     memclr(u, sizeof(*u));
     u->def.map[0] = def;
+    u->use.map[0] = use;
     u->c_in.map[0] = c_in;
     u->c_out.map[0] = c_out;
 }
@@ -138,7 +166,13 @@ bool mcdep_config_option(char name, char const tail[], ToolEnv *t)
 
 void config_init(ToolEnv *t)
 {   IGNORE(t);
+#ifdef TARGET_IS_X86_64
+    /* Floating arguments are passed in xmm registers, and prototyped    */
+    /* float arguments as floats.                                        */
+    config = CONFIG_FPREGARGS | CONFIG_UNWIDENED_NARROW_ARGS;
+#else
     config = 0;
+#endif
     pcs_flags = 0;
 }
 

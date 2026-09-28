@@ -18,6 +18,24 @@
  *      ...         padding to keep esp 16-byte aligned at calls
  *      ...-p       local at BINDADDR_LOC p
  *      esp+n       outgoing argument byte n (TARGET_STACK_MOVES_ONCE)
+ *
+ * Frame layout (x86-64):
+ *
+ *      rbp+16+n    incoming stack argument byte n
+ *      rbp+8       return address
+ *      rbp+0       saved rbp
+ *      rbp-8*k     k saved callee-save registers (rbx, r12-r15)
+ *      ...-16      16-byte scratch slot; its second half holds the
+ *                  address of a struct result returned in memory
+ *      ...         home area for the register arguments (see below)
+ *      ...         padding to keep rsp 16-byte aligned at calls
+ *      ...-p       local at BINDADDR_LOC p
+ *      rsp+n       outgoing stack argument byte n
+ *
+ * The home area gives the arguments passed in registers an address.  For
+ * a variadic function it is the psABI's register save area: rdi, rsi,
+ * rdx, rcx, r8, r9, then xmm0-7 in 16 bytes each.  Otherwise it is the
+ * six integer registers followed by 8 bytes for each floating one.
  */
 
 #include <string.h>
@@ -32,6 +50,7 @@
 #include "codebuf.h"
 #include "regalloc.h"
 #include "cg.h"
+#include "cgdefs.h"
 #include "flowgraf.h"
 #include "builtin.h"
 #include "bind.h"
@@ -41,21 +60,36 @@
 
 #include "x86ins.h"
 
+#ifdef TARGET_IS_X86_64
+#  define IS64 1
+#else
+#  define IS64 0
+#endif
+#define WORD X86_PTRSIZE        /* the size of an integer register      */
+
 /* ---------------------------------------------------------------- */
 /* Registers                                                          */
 /* ---------------------------------------------------------------- */
 
 /* Internal register number to hardware encoding (see target.h).      */
 static int const hwreg[NINTREGS] = {
+#ifdef TARGET_IS_X86_64
+    X86_EDI, X86_ESI, X86_EDX, X86_ECX, X86_R8, X86_R9,
+    X86_EAX, X86_R10, X86_R11,
+    X86_EBX, X86_R12, X86_R13, X86_R14, X86_R15,
+    X86_ESP, X86_EBP
+#else
     X86_EAX, X86_EDX, X86_ECX, X86_EBX, X86_ESI, X86_EDI, X86_EBP, X86_ESP,
     -1
+#endif
 };
 
 #define isfpreg(r) ((r) >= R_F0 && (r) < R_F0+NFLTREGS)
 #define xmm(r)     ((int)((r) - R_F0))
 
-/* Hardware registers with 8-bit subregisters (al, cl, dl, bl).       */
-#define byteable(hw) ((hw) <= X86_EBX)
+/* Hardware registers with 8-bit subregisters: on i386 al, cl, dl, bl; */
+/* on x86-64 (with a REX prefix) all of them.                          */
+#define byteable(hw) (IS64 || (hw) <= X86_EBX)
 
 static int hw(RealRegister r)
 {   if (r < 0 || r >= NINTREGS || hwreg[r] < 0) syserr("x86 hw reg %ld", (long)r);
@@ -68,6 +102,10 @@ static int hw(RealRegister r)
 
 X86Ins *x86_insns, *x86_insns_tail;
 int32 x86_fnlabel;            /* distinguishes labels between functions */
+
+/* The operand size of the integer operation being translated: 4, or  */
+/* on x86-64 8 unless the jopcode is marked J_W32.                     */
+static int isz;
 
 static X86Ins *newins(char const *mnem)
 {   X86Ins *p = (X86Ins *)SynAlloc(sizeof(X86Ins));
@@ -96,17 +134,35 @@ static X86Op op_imm(int32 n)
     return o;
 }
 
+#ifndef TARGET_IS_X86_64
 /* $sym+n */
 static X86Op op_symimm(Symstr const *sym, int32 n)
 {   X86Op o; memclr(&o, sizeof(o));
     o.kind = XO_IMM, o.sym = sym, o.disp = n;
     return o;
 }
+#endif
 
+/* disp(base,index,scale); on x86-64, with no base or index register  */
+/* the address is relative to rip (see asm.c).                        */
 static X86Op op_mem(int base, int index, int scale, int32 disp)
 {   X86Op o; memclr(&o, sizeof(o));
     o.kind = XO_MEM, o.reg = base, o.index = index, o.scale = scale;
     o.disp = disp;
+    return o;
+}
+
+/* sym+n in memory. */
+static X86Op op_symmem(Symstr const *sym, int32 n)
+{   X86Op o = op_mem(-1, -1, 0, n);
+    o.sym = sym;
+    return o;
+}
+
+/* A constant emitted by asm.c. */
+static X86Op op_labmem(int32 lab)
+{   X86Op o = op_mem(-1, -1, 0, 0);
+    o.lab = lab, o.haslab = 1;
     return o;
 }
 
@@ -150,6 +206,19 @@ static X86Ins *ins3(char const *m, X86Op a, X86Op b, X86Op c)
     return p;
 }
 
+/* The same, where m is a stem to be given a size suffix.             */
+static void insz1(char const *m, int size, X86Op a)
+{   ins1(m, a)->size = size;
+}
+
+static void insz2(char const *m, int size, X86Op src, X86Op dst)
+{   ins2(m, src, dst)->size = size;
+}
+
+static void insz3(char const *m, int size, X86Op a, X86Op b, X86Op c)
+{   ins3(m, a, b, c)->size = size;
+}
+
 static void deflabel(int32 lab)
 {   X86Ins *p = newins(NULL);
     p->kind = XI_LABEL, p->op[0] = op_lab(lab);
@@ -160,8 +229,17 @@ static void directive(char const *text)
     p->kind = XI_DIRECTIVE;
 }
 
-static X86Op R(RealRegister r) { return op_reg(hw(r), 4); }
-static X86Op X(RealRegister r) { return op_xmm(xmm(r)); }
+/* Integer register r as an operand of the current size, of size n,   */
+/* and as a whole register.                                           */
+static X86Op R(RealRegister r)          { return op_reg(hw(r), isz); }
+static X86Op Rn(RealRegister r, int n)  { return op_reg(hw(r), n); }
+static X86Op RW(RealRegister r)         { return op_reg(hw(r), WORD); }
+static X86Op HW(int hwr)                { return op_reg(hwr, WORD); }
+static X86Op X(RealRegister r)          { return op_xmm(xmm(r)); }
+
+/* The frame pointer and stack pointer. */
+#define FPREG X86_EBP
+#define SPREG X86_ESP
 
 /* ---------------------------------------------------------------- */
 /* Labels                                                             */
@@ -195,12 +273,36 @@ static int32 newlabel(void)
 static int32 nsaved;           /* number of callee-save regs pushed      */
 static int32 framepad;         /* bytes of alignment padding              */
 
+#ifdef TARGET_IS_X86_64
+static int32 const savedregs[] = { 9, 10, 11, 12, 13 };  /* rbx r12-r15 */
+#define NSAVEDREGS 5
+#else
 static int32 const savedregs[] = { 3, 4, 5 };   /* ebx esi edi */
 #define NSAVEDREGS 3
+#endif
 
-/* Offset from ebp of the scratch slot, and its size.                  */
+/* Offset from the frame pointer of the scratch slot, and its size.   */
 #define SCRATCHSIZE 16
-#define scratch_offset() (-4*nsaved - SCRATCHSIZE)
+#define scratch_offset() (-WORD*nsaved - SCRATCHSIZE)
+
+#ifdef TARGET_IS_X86_64
+static int32 enter_desc;       /* J_ENTER's argument description         */
+static int32 homesize;         /* size of the home area                   */
+
+#define HOME_GPRS       (8*NARGREGS)
+#define home_offset()   (scratch_offset() - homesize)
+#define is_variadic()   ((enter_desc & K_VAFUNC) != 0)
+
+/* The offset from the frame pointer of argument word w.              */
+static int32 arg_address(int32 w)
+{   int32 nflt = currentfunction.fltargwords;
+    if (w < nflt)
+        return home_offset() + HOME_GPRS + (is_variadic() ? 16 : 8)*w;
+    w -= nflt;
+    if (w < NARGREGS) return home_offset() + 8*w;
+    return 16 + 8*(w - NARGREGS);
+}
+#endif
 
 RealRegister local_base(Binder const *b)
 {   IGNORE(b);
@@ -215,9 +317,17 @@ int32 local_address(Binder const *b)
 default:
         syserr(syserr_local_addr, (long)p);
 case BINDADDR_LOC:
+#ifdef TARGET_IS_X86_64
+        return home_offset() - framepad - q;
+#else
         return -4*nsaved - SCRATCHSIZE - framepad - q;
+#endif
 case BINDADDR_ARG:
+#ifdef TARGET_IS_X86_64
+        return arg_address(q / 8) + q % 8;
+#else
         return 8 + q;
+#endif
     }
 }
 
@@ -225,55 +335,120 @@ static bool function_saves(int32 r)
 {   return member_RealRegSet(&regmaskvec, r);
 }
 
-static void gen_prologue(void)
-{   int32 i, align;
-    ins1("pushl", op_reg(X86_EBP, 4));
-    ins2("movl", op_reg(X86_ESP, 4), op_reg(X86_EBP, 4));
-    nsaved = 0;
-    for (i = 0; i < NSAVEDREGS; i++)
-        if (function_saves(savedregs[i])) {
-            ins1("pushl", R(savedregs[i]));
-            nsaved++;
-        }
-    /* On entry esp = 12 (mod 16); after pushing ebp and the saved     */
-    /* registers it is 8-4*nsaved.  Choose the padding so that esp is  */
-    /* 16-byte aligned once the scratch slot, padding and              */
-    /* greatest_stackdepth bytes of locals/outgoing args are dropped.  */
-    align = (8 - 4*nsaved - SCRATCHSIZE - greatest_stackdepth) & 15;
-    framepad = align;
-    {   int32 frame = SCRATCHSIZE + framepad + greatest_stackdepth;
-        ins2("subl", op_imm(frame), op_reg(X86_ESP, 4));
-    }
-}
-
 static bool returns_struct_in_memory(void)
 {   return (currentfunction.resultrep & MCR_SORT_MASK) == MCR_SORT_STRUCT &&
            currentfunction.nresultregs == 0;
 }
 
+static void gen_prologue(void)
+{   int32 i;
+    insz1("push", WORD, HW(FPREG));
+    insz2("mov", WORD, HW(SPREG), HW(FPREG));
+    nsaved = 0;
+    for (i = 0; i < NSAVEDREGS; i++)
+        if (function_saves(savedregs[i])) {
+            insz1("push", WORD, RW(savedregs[i]));
+            nsaved++;
+        }
+#ifdef TARGET_IS_X86_64
+    {   int32 nint = k_intregs_(enter_desc), nflt = k_fltregs_(enter_desc);
+        homesize = is_variadic() ? HOME_GPRS + 16*NFLTARGREGS :
+                   nint + nflt == 0 ? 0 :
+                   HOME_GPRS + 8*currentfunction.fltargwords;
+        /* On entry rsp = 8 (mod 16), and pushing rbp aligns it.  Choose */
+        /* the padding so that rsp is still 16-byte aligned once the     */
+        /* saved registers, scratch slot, home area, padding and         */
+        /* greatest_stackdepth bytes of locals/outgoing args are pushed. */
+        framepad = (-8*nsaved - SCRATCHSIZE - homesize - greatest_stackdepth) & 15;
+        {   int32 frame = SCRATCHSIZE + homesize + framepad + greatest_stackdepth;
+            if (frame != 0) insz2("sub", 8, op_imm(frame), HW(SPREG));
+        }
+        /* Give the register arguments their addresses if they need them. */
+        if (is_variadic()) nint = NARGREGS, nflt = NFLTARGREGS;
+        if (is_variadic() || (procflags & PROC_ARGPUSH)) {
+            for (i = 0; i < nint; i++)
+                insz2("mov", 8, RW(R_A1+i), op_mem(FPREG, -1, 0, home_offset() + 8*i));
+            for (i = 0; i < nflt; i++)
+                ins2("movsd", op_xmm(i), op_mem(FPREG, -1, 0,
+                     home_offset() + HOME_GPRS + (is_variadic() ? 16 : 8)*i));
+        }
+        if (returns_struct_in_memory())
+            insz2("mov", 8, RW(R_A1), op_mem(FPREG, -1, 0, scratch_offset() + 8));
+    }
+#else
+    /* On entry esp = 12 (mod 16); after pushing ebp and the saved     */
+    /* registers it is 8-4*nsaved.  Choose the padding so that esp is  */
+    /* 16-byte aligned once the scratch slot, padding and              */
+    /* greatest_stackdepth bytes of locals/outgoing args are dropped.  */
+    framepad = (8 - 4*nsaved - SCRATCHSIZE - greatest_stackdepth) & 15;
+    {   int32 frame = SCRATCHSIZE + framepad + greatest_stackdepth;
+        insz2("sub", 4, op_imm(frame), HW(SPREG));
+    }
+#endif
+}
+
+#ifdef TARGET_IS_X86_64
+/*
+ * mip returns a struct in registers in rax and r10 (internal registers 6
+ * and 7).  The psABI returns its INTEGER eightbytes in rax then rdx, and
+ * its SSE ones in xmm0 then xmm1, as the K_RESULTSSE flags in desc say.
+ */
+static X86Op struct_result_reg(int32 desc, int32 i)
+{   bool sse0 = (desc & K_RESULTSSE0) != 0;
+    if (i == 0) return sse0 ? op_xmm(0) : HW(X86_EAX);
+    if (desc & K_RESULTSSE1) return op_xmm(sse0 ? 1 : 0);
+    return HW(sse0 ? X86_EAX : X86_EDX);
+}
+
+/* After a call: from the psABI's registers to rax and r10.           */
+static void struct_result_from_abi(int32 desc)
+{   int32 n = k_resultregs_(desc);
+    if (n == 2) insz2("mov", 8, struct_result_reg(desc, 1), HW(X86_R10));
+    if (n >= 1 && (desc & K_RESULTSSE0))
+        insz2("mov", 8, struct_result_reg(desc, 0), HW(X86_EAX));
+}
+
+/* Before returning: from rax and r10 to the psABI's registers.       */
+static void struct_result_to_abi(int32 desc)
+{   int32 n = k_resultregs_(desc);
+    if (n >= 1 && (desc & K_RESULTSSE0))
+        insz2("mov", 8, HW(X86_EAX), struct_result_reg(desc, 0));
+    if (n == 2) insz2("mov", 8, HW(X86_R10), struct_result_reg(desc, 1));
+}
+#endif
+
 static void gen_epilogue(void)
 {   int32 i;
+#ifdef TARGET_IS_X86_64
+    /* The address of a memory struct result is returned in rax.      */
+    if (returns_struct_in_memory())
+        insz2("mov", 8, op_mem(FPREG, -1, 0, scratch_offset() + 8), HW(X86_EAX));
+    struct_result_to_abi(enter_desc);
+#else
     int32 rep = currentfunction.resultrep;
     /* The ABI returns floating results in st(0).                     */
     if (rep == MCR_SORT_FLOATING+4) {
-        ins2("movss", op_xmm(0), op_mem(X86_EBP, -1, 0, scratch_offset()));
-        ins1("flds", op_mem(X86_EBP, -1, 0, scratch_offset()));
+        ins2("movss", op_xmm(0), op_mem(FPREG, -1, 0, scratch_offset()));
+        ins1("flds", op_mem(FPREG, -1, 0, scratch_offset()));
     } else if (rep == MCR_SORT_FLOATING+8) {
-        ins2("movsd", op_xmm(0), op_mem(X86_EBP, -1, 0, scratch_offset()));
-        ins1("fldl", op_mem(X86_EBP, -1, 0, scratch_offset()));
+        ins2("movsd", op_xmm(0), op_mem(FPREG, -1, 0, scratch_offset()));
+        ins1("fldl", op_mem(FPREG, -1, 0, scratch_offset()));
     } else if (returns_struct_in_memory()) {
         /* ... and the address of a memory struct result in eax.      */
-        ins2("movl", op_mem(X86_EBP, -1, 0, 8), op_reg(X86_EAX, 4));
+        insz2("mov", 4, op_mem(FPREG, -1, 0, 8), HW(X86_EAX));
     }
-    ins2("leal", op_mem(X86_EBP, -1, 0, -4*nsaved), op_reg(X86_ESP, 4));
+#endif
+    insz2("lea", WORD, op_mem(FPREG, -1, 0, -WORD*nsaved), HW(SPREG));
     for (i = NSAVEDREGS; --i >= 0; )
         if (function_saves(savedregs[i]))
-            ins1("popl", R(savedregs[i]));
-    ins1("popl", op_reg(X86_EBP, 4));
+            insz1("pop", WORD, RW(savedregs[i]));
+    insz1("pop", WORD, HW(FPREG));
+#ifndef TARGET_IS_X86_64
     /* The callee pops the hidden struct-result pointer.              */
     if (returns_struct_in_memory())
         ins1("ret", op_imm(4));
     else
+#endif
         ins0("ret");
 }
 
@@ -358,19 +533,19 @@ static X86Op memop(Icode const *ic, bool rr)
 }
 
 static void movr(RealRegister to, RealRegister from)
-{   if (to != from) ins2("movl", R(from), R(to));
+{   if (to != from) insz2("mov", WORD, RW(from), RW(to));
 }
 
 static void movx(RealRegister to, RealRegister from)
 {   if (to != from) ins2("movaps", X(from), X(to));
 }
 
-/* r1 = r2 op r3, op commutative ("addl" etc).                        */
+/* r1 = r2 op r3, op commutative ("add" etc).                         */
 static void commutative_rr(char const *m, Icode const *ic)
 {   RealRegister r1 = ic->r1.rr, r2 = ic->r2.rr, r3 = ic->r3.rr;
-    if (r1 == r2) ins2(m, R(r3), R(r1));
-    else if (r1 == r3) ins2(m, R(r2), R(r1));
-    else { movr(r1, r2); ins2(m, R(r3), R(r1)); }
+    if (r1 == r2) insz2(m, isz, R(r3), R(r1));
+    else if (r1 == r3) insz2(m, isz, R(r2), R(r1));
+    else { movr(r1, r2); insz2(m, isz, R(r3), R(r1)); }
 }
 
 /* r1 = r2 op r3, op not commutative.  regalloc ensures r1 != r3      */
@@ -379,13 +554,13 @@ static void asym_rr(char const *m, Icode const *ic)
 {   RealRegister r1 = ic->r1.rr, r2 = ic->r2.rr, r3 = ic->r3.rr;
     if (r1 != r2 && r1 == r3) syserr("x86: 2-address clash");
     movr(r1, r2);
-    ins2(m, R(r3), R(r1));
+    insz2(m, isz, R(r3), R(r1));
 }
 
 /* r1 = r2 op k.                                                      */
 static void op_rk(char const *m, Icode const *ic)
 {   movr(ic->r1.rr, ic->r2.rr);
-    ins2(m, op_imm(ic->r3.i), R(ic->r1.rr));
+    insz2(m, isz, op_imm(ic->r3.i), R(ic->r1.rr));
 }
 
 /* Floating point equivalents (m is the SSE mnemonic).                */
@@ -409,11 +584,48 @@ static void fasym_rev(char const *m, Icode const *ic)
     if (r1 == r3) ins2(m, X(r2), X(r1));
     else if (r1 == r2) {
         /* r1 = r3 op r1: go via the scratch slot.                    */
-        X86Op s = op_mem(X86_EBP, -1, 0, scratch_offset());
+        X86Op s = op_mem(FPREG, -1, 0, scratch_offset());
         ins2(m[3] == 's' ? "movss" : "movsd", X(r1), s);
         movx(r1, r3);
         ins2(m, s, X(r1));
     } else { movx(r1, r3); ins2(m, X(r2), X(r1)); }
+}
+
+/* The offset of the next constant in the read-only data area.       */
+static int32 const_offset(void)
+{   return constdata_size();
+}
+
+#ifdef TARGET_IS_X86_64
+/* Whether sym is defined in this file, and not visible outside it: if  */
+/* not, its address is found via the GOT (which the linker can relax    */
+/* to a lea), and calls to it go via the PLT, as position-independent   */
+/* code needs.                                                          */
+static bool is_local_sym(Symstr const *sym)
+{   ExtRef *x;
+    if (sym == bindsym_(datasegment) || sym == bindsym_(bsssegment) ||
+        sym == bindsym_(constdatasegment) || sym == bindsym_(codesegment))
+        return YES;
+    x = symext_(sym);
+    return x != NULL && (x->extflags & xr_defloc);
+}
+#endif
+
+/* r1 = the address of sym+n.                                         */
+static void load_address(RealRegister r1, Symstr const *sym, int32 n)
+{
+#ifdef TARGET_IS_X86_64
+    if (is_local_sym(sym))
+        insz2("lea", 8, op_symmem(sym, n), RW(r1));
+    else {
+        X86Op got = op_symmem(sym, 0);
+        got.reloc = 1;
+        insz2("mov", 8, got, RW(r1));
+        if (n != 0) insz2("lea", 8, op_mem(hw(r1), -1, 0, n), RW(r1));
+    }
+#else
+    insz2("mov", 4, op_symimm(sym, n), RW(r1));
+#endif
 }
 
 /* A floating constant: put it in the read-only data area.            */
@@ -421,16 +633,24 @@ static void load_fpconst(RealRegister r1, FloatCon *fc, int32 len)
 {   int32 off;
     DataAreaSort old = SetDataArea(DS_Const);
     padstatic(len);
-    off = constdata_size();
+    off = const_offset();
     gendcE(len, fc);
     SetDataArea(old);
     ins2(len == 4 ? "movss" : "movsd",
-         op_mem(-1, -1, 0, off), X(r1))->op[0].sym = bindsym_(constdatasegment);
+         op_symmem(bindsym_(constdatasegment), off), X(r1));
 }
 
 /* Constants emitted by asm.c if used.                                */
 bool x86_negmask_used;          /* sign-bit masks for negating floats  */
 bool x86_two32_used;            /* 2^32 as a double                    */
+bool x86_two63_used;            /* 2^63 as a double                    */
+
+#ifdef TARGET_IS_X86_64
+/* Scratch registers that RealRegisterUse (mcdep.c) keeps free for the */
+/* unsigned conversions.                                              */
+#define SCRATCH_INT     X86_R11
+#define SCRATCH_XMM     15
+#endif
 
 /* ---------------------------------------------------------------- */
 /* Switch tables                                                      */
@@ -439,8 +659,11 @@ bool x86_two32_used;            /* 2^32 as a double                    */
 static int32 casetab_label, casedef_label, casetab_entries;
 static LabelNumber *casetab_default;
 
+/* On x86-64, entries are offsets from the table, so that the code is  */
+/* position independent.                                                */
 static void casetab_entry(int32 lab)
-{   X86Ins *p = ins1(".long", op_lab(lab));
+{   X86Ins *p = IS64 ? ins2(".long", op_lab(lab), op_lab(casetab_label)) :
+                       ins1(".long", op_lab(lab));
     p->kind = XI_DATA;
 }
 
@@ -463,6 +686,167 @@ static void end_casetable(void)
 }
 
 /* ---------------------------------------------------------------- */
+/* Block moves                                                        */
+/* ---------------------------------------------------------------- */
+
+/* rep movs or rep stos of n bytes, in the largest units that fit.    */
+static void rep_string(char const *m, int32 n)
+{   int size = IS64 && (n & 7) == 0 ? 8 : (n & 3) == 0 ? 4 : 1;
+    static char const *const movs[] = { 0, "rep movsb", 0, 0, "rep movsl",
+                                        0, 0, 0, "rep movsq" };
+    static char const *const stos[] = { 0, "rep stosb", 0, 0, "rep stosl",
+                                        0, 0, 0, "rep stosq" };
+    insz2("mov", 4, op_imm(n / size), op_reg(X86_ECX, 4));
+    ins0((m[0] == 'm' ? movs : stos)[size]);
+}
+
+/* ---------------------------------------------------------------- */
+/* Calls                                                              */
+/* ---------------------------------------------------------------- */
+
+static void gen_call(Icode const *ic)
+{   J_OPCODE opm = ic->op & J_TABLE_BITS;
+    int32 desc = ic->r2.i;
+#ifdef TARGET_IS_X86_64
+    X86Op target;
+    if (opm == J_CALLR) target = RW(ic->r3.rr);
+    if (desc & K_VACALL) {
+        /* al gives the number of vector registers used.              */
+        if (opm == J_CALLR && hw(ic->r3.rr) == X86_EAX) {
+            target = HW(SCRATCH_INT);
+            insz2("mov", 8, HW(X86_EAX), target);
+        }
+        insz2("mov", 4, op_imm(k_fltregs_(desc)), op_reg(X86_EAX, 4));
+    }
+    if (opm == J_CALLK) {
+        X86Op f = op_sym(ic->r3.sym);
+        obj_symref(ic->r3.sym, xr_code, 0);
+        f.reloc = !is_local_sym(ic->r3.sym);
+        ins1("call", f);
+    } else
+        ins1("call", op_star(target));
+    struct_result_from_abi(desc);
+#else
+    if (opm == J_CALLK) {
+        obj_symref(ic->r3.sym, xr_code, 0);
+        ins1("call", op_sym(ic->r3.sym));
+    } else
+        ins1("call", op_star(RW(ic->r3.rr)));
+    if (desc & (K_FLTRESULT|K_DBLRESULT)) {
+        /* Move the result from st(0) to xmm0.                        */
+        X86Op s = op_mem(FPREG, -1, 0, scratch_offset());
+        bool d = (desc & K_DBLRESULT) != 0;
+        ins1(d ? "fstpl" : "fstps", s);
+        ins2(d ? "movsd" : "movss", s, op_xmm(0));
+    }
+    /* A memory struct result's pointer is popped by callee.          */
+    if (desc & K_STRUCTRESULT)
+        insz2("sub", 4, op_imm(4), HW(SPREG));
+#endif
+}
+
+/* ---------------------------------------------------------------- */
+/* Conversions between integer and floating point                     */
+/* ---------------------------------------------------------------- */
+
+/* r1 (float or double) = r3 (integer).                               */
+static void gen_float(J_OPCODE op, RealRegister r1, RealRegister r3)
+{   bool dbl = (op & J_TABLE_BITS) == J_FLTDR;
+#ifdef TARGET_IS_X86_64
+    char const *cvt = dbl ? "cvtsi2sd" : "cvtsi2ss";
+    if (!(op & J_UNSIGNED))
+        insz2(cvt, isz, R(r3), X(r1));
+    else if (isz == 4) {
+        /* Zero extend, and convert as a (positive) 64-bit number.    */
+        insz2("mov", 4, Rn(r3, 4), op_reg(SCRATCH_INT, 4));
+        insz2(cvt, 8, HW(SCRATCH_INT), X(r1));
+    } else {
+        /* If the top bit is set, halve the number (keeping the bottom  */
+        /* bit, so as to round correctly), convert, and double.         */
+        int32 big = newlabel(), done = newlabel(), odd = newlabel();
+        insz2("test", 8, RW(r3), RW(r3));
+        ins1("js", op_lab(big));
+        insz2(cvt, 8, RW(r3), X(r1));
+        ins1("jmp", op_lab(done));
+        deflabel(big);
+        insz2("mov", 8, RW(r3), HW(SCRATCH_INT));
+        insz1("shr", 8, HW(SCRATCH_INT));
+        ins1("jnc", op_lab(odd));
+        insz2("or", 8, op_imm(1), HW(SCRATCH_INT));
+        deflabel(odd);
+        insz2(cvt, 8, HW(SCRATCH_INT), X(r1));
+        ins2(dbl ? "addsd" : "addss", X(r1), X(r1));
+        deflabel(done);
+    }
+#else
+    if (op & J_UNSIGNED) {
+        /* Convert as signed, then add 2^32 if the top bit was set; */
+        /* for float, do that in double to avoid double rounding.   */
+        int32 skip = newlabel();
+        ins2("cvtsi2sd", R(r3), X(r1));
+        insz2("test", 4, R(r3), R(r3));
+        ins1("jns", op_lab(skip));
+        x86_two32_used = YES;
+        ins2("addsd", op_labmem(XLAB_TWO32), X(r1));
+        deflabel(skip);
+        if (!dbl) ins2("cvtsd2ss", X(r1), X(r1));
+    } else
+        ins2(dbl ? "cvtsi2sd" : "cvtsi2ss", R(r3), X(r1));
+#endif
+}
+
+/* r1 (integer) = r3 (float or double), truncating.                   */
+static void gen_fix(J_OPCODE op, RealRegister r1, RealRegister r3)
+{   bool dbl = (op & J_TABLE_BITS) == J_FIXDR;
+#ifdef TARGET_IS_X86_64
+    char const *cvt = dbl ? "cvttsd2si" : "cvttss2si";
+    if (!(op & J_UNSIGNED))
+        insz2(cvt, isz, X(r3), R(r1));
+    else if (isz == 4)
+        /* The result fits in a signed 64-bit number.                 */
+        insz2(cvt, 8, X(r3), RW(r1));
+    else {
+        /* Numbers of 2^63 or more have 2^63 subtracted before the     */
+        /* conversion, and added (by flipping the top bit) after.      */
+        int32 big = newlabel(), done = newlabel();
+        X86Op s = op_xmm(SCRATCH_XMM);
+        x86_two63_used = YES;
+        if (dbl) ins2("movaps", X(r3), s);
+        else ins2("cvtss2sd", X(r3), s);
+        ins2("ucomisd", op_labmem(XLAB_TWO63), s);
+        ins1("jae", op_lab(big));
+        insz2("cvttsd2si", 8, s, RW(r1));
+        ins1("jmp", op_lab(done));
+        deflabel(big);
+        ins2("subsd", op_labmem(XLAB_TWO63), s);
+        insz2("cvttsd2si", 8, s, RW(r1));
+        insz2("btc", 8, op_imm(63), RW(r1));
+        deflabel(done);
+    }
+#else
+    if (op & J_UNSIGNED) {
+        /* Use the x87 to convert to a 64-bit integer, truncating,  */
+        /* and take the low word.                                   */
+        int32 s = scratch_offset();
+        X86Op cw_old = op_mem(FPREG, -1, 0, s + 8);
+        X86Op cw_new = op_mem(FPREG, -1, 0, s + 10);
+        X86Op val = op_mem(FPREG, -1, 0, s);
+        ins2(dbl ? "movsd" : "movss", X(r3), val);
+        ins1(dbl ? "fldl" : "flds", val);
+        ins1("fnstcw", cw_old);
+        ins2("movzwl", cw_old, R(r1));
+        insz2("or", 4, op_imm(0x0c00), R(r1));      /* round to zero    */
+        insz2("mov", 2, Rn(r1, 2), cw_new);
+        ins1("fldcw", cw_new);
+        ins1("fistpll", val);
+        ins1("fldcw", cw_old);
+        insz2("mov", 4, val, R(r1));
+    } else
+        ins2(dbl ? "cvttsd2si" : "cvttss2si", X(r3), R(r1));
+#endif
+}
+
+/* ---------------------------------------------------------------- */
 /* The instruction selector                                           */
 /* ---------------------------------------------------------------- */
 
@@ -474,6 +858,8 @@ void show_instruction(Icode const *const ic)
     int32 m = ic->r3.i;
 
     if (debugging(DEBUG_CG)) print_jopcode(ic);
+
+    isz = IS64 && !(op & J_W32) ? 8 : 4;
 
     /* flowgraf omits trailing table entries that would branch to the  */
     /* next instruction (as they may simply fall through on ARM).       */
@@ -489,6 +875,9 @@ void show_instruction(Icode const *const ic)
         return;
 
     case J_ENTER:
+#ifdef TARGET_IS_X86_64
+        enter_desc = m;
+#endif
         gen_prologue();
         return;
 
@@ -514,16 +903,25 @@ void show_instruction(Icode const *const ic)
     case J_CASEBRANCH:
         /* r1 is the index, m the table size.  Entry 0 of the table   */
         /* (the first J_BXX) is the default, for out-of-range values. */
+        /* On x86-64, cg.c makes the index a 64-bit value.            */
         casetab_label = newlabel();
         casedef_label = newlabel();
         casetab_entries = m;
         casetab_default = NULL;
-        ins2("cmpl", op_imm(m-1), R(r1));
+        insz2("cmp", WORD, op_imm(m-1), RW(r1));
         ins1("jae", op_lab(casedef_label));
+#ifdef TARGET_IS_X86_64
+        /* RealRegisterUse keeps r1 out of r10 and r11.                */
+        insz2("lea", 8, op_labmem(casetab_label), HW(X86_R11));
+        ins2("movslq", op_mem(X86_R11, hw(r1), 4, 4), HW(X86_R10));
+        insz2("add", 8, HW(X86_R11), HW(X86_R10));
+        ins1("jmp", op_star(HW(X86_R10)));
+#else
         {   X86Op t = op_mem(-1, hw(r1), 4, 4);
             t.lab = casetab_label, t.haslab = 1;
             ins1("jmp", op_star(t));
         }
+#endif
         directive("\t.section\t.rodata");
         directive("\t.p2align\t2");
         deflabel(casetab_label);
@@ -539,171 +937,187 @@ void show_instruction(Icode const *const ic)
 
     /* ---- moves and constants ---- */
     case J_MOVR:
+#ifdef TARGET_IS_X86_64
+    case J_MOVLR:                       /* from J_LDRLV of a register  */
+#endif
         movr(r1, r3);
         return;
     case J_MOVK:
-        ins2("movl", op_imm(m), R(r1));
+        /* On x86-64, a 32-bit move zero extends: use it if that gives */
+        /* the right value.                                           */
+        insz2("mov", m >= 0 ? 4 : WORD, op_imm(m), Rn(r1, m >= 0 ? 4 : WORD));
         return;
     case J_ADCON:
-        ins2("movl", op_symimm(ic->r3.sym, ic->r2.i), R(r1));
+        load_address(r1, ic->r3.sym, ic->r2.i);
         return;
     case J_ADCONLL:
         /* The address of a long long literal.                        */
         {   int32 off;
             DataAreaSort old = SetDataArea(DS_Const);
             padstatic(8);
-            off = constdata_size();
+            off = const_offset();
             gendcI(4, (int32)ic->r3.i64->bin.i.lo);
             gendcI(4, (int32)ic->r3.i64->bin.i.hi);
             SetDataArea(old);
-            ins2("movl", op_symimm(bindsym_(constdatasegment), off), R(r1));
+            load_address(r1, bindsym_(constdatasegment), off);
         }
         return;
     case J_STRING:
         {   int32 off;
             DataAreaSort old = SetDataArea(DS_Const);
-            off = constdata_size();
+            off = const_offset();
             vg_genstring(ic->r3.s, stringlength(ic->r3.s)+1, 0);
             padstatic(4);
             SetDataArea(old);
-            ins2("movl", op_symimm(bindsym_(constdatasegment), off), R(r1));
+            load_address(r1, bindsym_(constdatasegment), off);
         }
         return;
 
     /* ---- integer loads and stores ---- */
     case J_LDRK: case J_LDRR:
-        ins2("movl", memop(ic, opm == J_LDRR), R(r1));
+        insz2("mov", 4, memop(ic, opm == J_LDRR), Rn(r1, 4));
         return;
     case J_LDRBK: case J_LDRBR:
-        ins2(op & J_SIGNED ? "movsbl" : "movzbl", memop(ic, opm == J_LDRBR), R(r1));
+        ins2(op & J_SIGNED ? "movsbl" : "movzbl", memop(ic, opm == J_LDRBR), Rn(r1, 4));
         return;
     case J_LDRWK: case J_LDRWR:
-        ins2(op & J_SIGNED ? "movswl" : "movzwl", memop(ic, opm == J_LDRWR), R(r1));
+        ins2(op & J_SIGNED ? "movswl" : "movzwl", memop(ic, opm == J_LDRWR), Rn(r1, 4));
         return;
     case J_STRK: case J_STRR:
-        ins2("movl", R(r1), memop(ic, opm == J_STRR));
+        insz2("mov", 4, Rn(r1, 4), memop(ic, opm == J_STRR));
         return;
     case J_STRWK: case J_STRWR:
-        ins2("movw", op_reg(hw(r1), 2), memop(ic, opm == J_STRWR));
+        insz2("mov", 2, Rn(r1, 2), memop(ic, opm == J_STRWR));
         return;
     case J_STRBK: case J_STRBR:
         {   X86Op mem = memop(ic, opm == J_STRBR);
             if (byteable(hw(r1)))
-                ins2("movb", op_reg(hw(r1), 1), mem);
+                insz2("mov", 1, Rn(r1, 1), mem);
             else {
                 /* esi/edi have no byte form: borrow a byteable       */
                 /* register not used in the address.                  */
                 int t;
                 for (t = X86_EAX; t <= X86_EBX; t++)
                     if (t != mem.reg && t != mem.index) break;
-                ins1("pushl", op_reg(t, 4));
-                ins2("movl", R(r1), op_reg(t, 4));
-                ins2("movb", op_reg(t, 1), mem);
-                ins1("popl", op_reg(t, 4));
+                insz1("push", 4, op_reg(t, 4));
+                insz2("mov", 4, Rn(r1, 4), op_reg(t, 4));
+                insz2("mov", 1, op_reg(t, 1), mem);
+                insz1("pop", 4, op_reg(t, 4));
             }
         }
         return;
+#ifdef TARGET_IS_X86_64
+    case J_LDRLK: case J_LDRLR:
+        insz2("mov", 8, memop(ic, opm == J_LDRLR), RW(r1));
+        return;
+    case J_STRLK: case J_STRLR:
+        insz2("mov", 8, RW(r1), memop(ic, opm == J_STRLR));
+        return;
+#endif
 
     /* ---- integer arithmetic ---- */
     case J_ADDK:
-        if (r1 == r2) ins2("addl", op_imm(m), R(r1));
-        else ins2("leal", op_mem(hw(r2), -1, 0, m), R(r1));
+        if (r1 == r2) insz2("add", isz, op_imm(m), R(r1));
+        else insz2("lea", isz, op_mem(hw(r2), -1, 0, m), R(r1));
         return;
     case J_ADDR:
         if (r1 != r2 && r1 != r3)
-            ins2("leal", op_mem(hw(r2), hw(r3), 1, 0), R(r1));
-        else commutative_rr("addl", ic);
+            insz2("lea", isz, op_mem(hw(r2), hw(r3), 1, 0), R(r1));
+        else commutative_rr("add", ic);
         return;
     case J_SUBK:
-        if (r1 == r2) ins2("subl", op_imm(m), R(r1));
-        else ins2("leal", op_mem(hw(r2), -1, 0, -m), R(r1));
+        if (r1 == r2) insz2("sub", isz, op_imm(m), R(r1));
+        else insz2("lea", isz, op_mem(hw(r2), -1, 0, -m), R(r1));
         return;
     case J_SUBR:
-        asym_rr("subl", ic);
+        asym_rr("sub", ic);
         return;
     case J_RSBK:                        /* r1 = k - r2 */
         if (r1 == r2) {
-            ins1("negl", R(r1));
-            ins2("addl", op_imm(m), R(r1));
+            insz1("neg", isz, R(r1));
+            insz2("add", isz, op_imm(m), R(r1));
         } else {
-            ins2("movl", op_imm(m), R(r1));
-            ins2("subl", R(r2), R(r1));
+            insz2("mov", isz, op_imm(m), R(r1));
+            insz2("sub", isz, R(r2), R(r1));
         }
         return;
     case J_RSBR:                        /* r1 = r3 - r2 */
-        if (r1 == r3) ins2("subl", R(r2), R(r1));
+        if (r1 == r3) insz2("sub", isz, R(r2), R(r1));
         else if (r1 == r2) {
-            ins1("negl", R(r1));
-            ins2("addl", R(r3), R(r1));
+            insz1("neg", isz, R(r1));
+            insz2("add", isz, R(r3), R(r1));
         } else {
             movr(r1, r3);
-            ins2("subl", R(r2), R(r1));
+            insz2("sub", isz, R(r2), R(r1));
         }
         return;
-    case J_ANDK: op_rk("andl", ic); return;
-    case J_ORRK: op_rk("orl", ic);  return;
-    case J_EORK: op_rk("xorl", ic); return;
-    case J_ANDR: commutative_rr("andl", ic); return;
-    case J_ORRR: commutative_rr("orl", ic);  return;
-    case J_EORR: commutative_rr("xorl", ic); return;
+    case J_ANDK: op_rk("and", ic); return;
+    case J_ORRK: op_rk("or", ic);  return;
+    case J_EORK: op_rk("xor", ic); return;
+    case J_ANDR: commutative_rr("and", ic); return;
+    case J_ORRR: commutative_rr("or", ic);  return;
+    case J_EORR: commutative_rr("xor", ic); return;
     case J_MULK:
-        ins3("imull", op_imm(m), R(r2), R(r1));
+        insz3("imul", isz, op_imm(m), R(r2), R(r1));
         return;
     case J_MULR:
-        commutative_rr("imull", ic);
+        commutative_rr("imul", ic);
         return;
     case J_DIVR: case J_REMR:
         /* RealRegisterUse keeps r1, r2 and r3 out of eax and edx.    */
-        ins2("movl", R(r2), op_reg(X86_EAX, 4));
+        insz2("mov", isz, R(r2), op_reg(X86_EAX, isz));
         if (op & J_UNSIGNED) {
-            ins2("xorl", op_reg(X86_EDX, 4), op_reg(X86_EDX, 4));
-            ins1("divl", R(r3));
+            insz2("xor", 4, op_reg(X86_EDX, 4), op_reg(X86_EDX, 4));
+            insz1("div", isz, R(r3));
         } else {
-            ins0("cltd");
-            ins1("idivl", R(r3));
+            ins0(isz == 8 ? "cqto" : "cltd");
+            insz1("idiv", isz, R(r3));
         }
-        ins2("movl", op_reg(opm == J_DIVR ? X86_EAX : X86_EDX, 4), R(r1));
+        insz2("mov", isz, op_reg(opm == J_DIVR ? X86_EAX : X86_EDX, isz), R(r1));
         return;
     case J_SHLK:
-        op_rk("shll", ic);
+        op_rk("shl", ic);
         return;
     case J_SHRK:
-        op_rk(op & J_UNSIGNED ? "shrl" : "sarl", ic);
+        op_rk(op & J_UNSIGNED ? "shr" : "sar", ic);
         return;
     case J_SHLR: case J_SHRR:
         /* RealRegisterUse keeps r1 and r2 out of ecx.                */
-        ins2("movl", R(r3), op_reg(X86_ECX, 4));
+        insz2("mov", 4, Rn(r3, 4), op_reg(X86_ECX, 4));
         movr(r1, r2);
-        ins2(opm == J_SHLR ? "shll" : op & J_UNSIGNED ? "shrl" : "sarl",
-             op_reg(X86_ECX, 1), R(r1));
+        insz2(opm == J_SHLR ? "shl" : op & J_UNSIGNED ? "shr" : "sar", isz,
+              op_reg(X86_ECX, 1), R(r1));
         return;
     case J_NEGR:
         movr(r1, r3);
-        ins1("negl", R(r1));
+        insz1("neg", isz, R(r1));
         return;
     case J_NOTR:
         movr(r1, r3);
-        ins1("notl", R(r1));
+        insz1("not", isz, R(r1));
         return;
     case J_EXTEND:
-        /* r3: 0 or 1 = from byte, 2 = from halfword.                 */
-        if (m == 2) ins2("movswl", op_reg(hw(r2), 2), R(r1));
-        else if (byteable(hw(r2))) ins2("movsbl", op_reg(hw(r2), 1), R(r1));
+        /* r3: 0 or 1 = from byte, 2 = from halfword, and on x86-64,  */
+        /* 3 = from word, and 4 = from word, zero extending.          */
+        if (m == 4) insz2("mov", 4, Rn(r2, 4), Rn(r1, 4));
+        else if (m == 3) ins2("movslq", Rn(r2, 4), RW(r1));
+        else if (m == 2) insz2("movsw", WORD, Rn(r2, 2), RW(r1));
+        else if (byteable(hw(r2))) insz2("movsb", WORD, Rn(r2, 1), RW(r1));
         else {
             movr(r1, r2);
-            ins2("shll", op_imm(24), R(r1));
-            ins2("sarl", op_imm(24), R(r1));
+            insz2("shl", 4, op_imm(24), R(r1));
+            insz2("sar", 4, op_imm(24), R(r1));
         }
         return;
 
     /* ---- compares ---- */
     case J_CMPK:
-        if (m == 0) ins2("testl", R(r2), R(r2));
-        else ins2("cmpl", op_imm(m), R(r2));
+        if (m == 0) insz2("test", isz, R(r2), R(r2));
+        else insz2("cmp", isz, op_imm(m), R(r2));
         cmp_is_fp = NO;
         return;
     case J_CMPR:
-        ins2("cmpl", R(r3), R(r2));
+        insz2("cmp", isz, R(r3), R(r2));
         cmp_is_fp = NO;
         return;
     case J_CMPFR: case J_CMPDR:
@@ -718,62 +1132,34 @@ void show_instruction(Icode const *const ic)
 
     /* ---- calls ---- */
     case J_CALLK: case J_CALLR:
-        {   int32 desc = ic->r2.i;
-            if (opm == J_CALLK) {
-                obj_symref(ic->r3.sym, xr_code, 0);
-                ins1("call", op_sym(ic->r3.sym));
-            } else
-                ins1("call", op_star(R(r3)));
-            if (desc & (K_FLTRESULT|K_DBLRESULT)) {
-                /* Move the result from st(0) to xmm0.                */
-                X86Op s = op_mem(X86_EBP, -1, 0, scratch_offset());
-                bool d = (desc & K_DBLRESULT) != 0;
-                ins1(d ? "fstpl" : "fstps", s);
-                ins2(d ? "movsd" : "movss", s, op_xmm(0));
-            }
-            /* A memory struct result's pointer is popped by callee.  */
-            if (desc & K_STRUCTRESULT)
-                ins2("subl", op_imm(4), op_reg(X86_ESP, 4));
-        }
+        gen_call(ic);
         return;
 
     /* ---- block moves (r1 = dest, r2 = source, r3 = byte count) ---- */
     case J_MOVC:
-        ins1("pushl", op_reg(X86_ESI, 4));
-        ins1("pushl", op_reg(X86_EDI, 4));
-        ins1("pushl", op_reg(X86_ECX, 4));
-        ins1("pushl", R(r2));
-        ins1("pushl", R(r1));
-        ins1("popl", op_reg(X86_EDI, 4));
-        ins1("popl", op_reg(X86_ESI, 4));
-        if ((m & 3) == 0) {
-            ins2("movl", op_imm(m >> 2), op_reg(X86_ECX, 4));
-            ins0("rep movsl");
-        } else {
-            ins2("movl", op_imm(m), op_reg(X86_ECX, 4));
-            ins0("rep movsb");
-        }
-        ins1("popl", op_reg(X86_ECX, 4));
-        ins1("popl", op_reg(X86_EDI, 4));
-        ins1("popl", op_reg(X86_ESI, 4));
+        insz1("push", WORD, HW(X86_ESI));
+        insz1("push", WORD, HW(X86_EDI));
+        insz1("push", WORD, HW(X86_ECX));
+        insz1("push", WORD, RW(r2));
+        insz1("push", WORD, RW(r1));
+        insz1("pop", WORD, HW(X86_EDI));
+        insz1("pop", WORD, HW(X86_ESI));
+        rep_string("movs", m);
+        insz1("pop", WORD, HW(X86_ECX));
+        insz1("pop", WORD, HW(X86_EDI));
+        insz1("pop", WORD, HW(X86_ESI));
         return;
     case J_CLRC:
-        ins1("pushl", op_reg(X86_EDI, 4));
-        ins1("pushl", op_reg(X86_ECX, 4));
-        ins1("pushl", op_reg(X86_EAX, 4));
-        ins1("pushl", R(r1));
-        ins1("popl", op_reg(X86_EDI, 4));
-        ins2("xorl", op_reg(X86_EAX, 4), op_reg(X86_EAX, 4));
-        if ((m & 3) == 0) {
-            ins2("movl", op_imm(m >> 2), op_reg(X86_ECX, 4));
-            ins0("rep stosl");
-        } else {
-            ins2("movl", op_imm(m), op_reg(X86_ECX, 4));
-            ins0("rep stosb");
-        }
-        ins1("popl", op_reg(X86_EAX, 4));
-        ins1("popl", op_reg(X86_ECX, 4));
-        ins1("popl", op_reg(X86_EDI, 4));
+        insz1("push", WORD, HW(X86_EDI));
+        insz1("push", WORD, HW(X86_ECX));
+        insz1("push", WORD, HW(X86_EAX));
+        insz1("push", WORD, RW(r1));
+        insz1("pop", WORD, HW(X86_EDI));
+        insz2("xor", 4, op_reg(X86_EAX, 4), op_reg(X86_EAX, 4));
+        rep_string("stos", m);
+        insz1("pop", WORD, HW(X86_EAX));
+        insz1("pop", WORD, HW(X86_ECX));
+        insz1("pop", WORD, HW(X86_EDI));
         return;
 
     /* ---- floating point (SSE2) ---- */
@@ -811,65 +1197,29 @@ void show_instruction(Icode const *const ic)
     case J_RDVFR: fasym_rev("divss", ic); return;
     case J_RDVDR: fasym_rev("divsd", ic); return;
     case J_NEGFR: case J_NEGDR:
-        {   X86Op mask = op_mem(-1, -1, 0, 0);
-            mask.lab = opm == J_NEGFR ? XLAB_NEGMASKF : XLAB_NEGMASKD;
-            mask.haslab = 1;
-            x86_negmask_used = YES;
-            movx(r1, r3);
-            ins2(opm == J_NEGFR ? "xorps" : "xorpd", mask, X(r1));
-        }
+        x86_negmask_used = YES;
+        movx(r1, r3);
+        ins2(opm == J_NEGFR ? "xorps" : "xorpd",
+             op_labmem(opm == J_NEGFR ? XLAB_NEGMASKF : XLAB_NEGMASKD), X(r1));
         return;
     case J_FLTFR: case J_FLTDR:
-        if (op & J_UNSIGNED) {
-            /* Convert as signed, then add 2^32 if the top bit was set; */
-            /* for float, do that in double to avoid double rounding.   */
-            int32 skip = newlabel();
-            ins2("cvtsi2sd", R(r3), X(r1));
-            ins2("testl", R(r3), R(r3));
-            ins1("jns", op_lab(skip));
-            {   X86Op two32 = op_mem(-1, -1, 0, 0);
-                two32.lab = XLAB_TWO32, two32.haslab = 1;
-                x86_two32_used = YES;
-                ins2("addsd", two32, X(r1));
-            }
-            deflabel(skip);
-            if (opm == J_FLTFR) ins2("cvtsd2ss", X(r1), X(r1));
-        } else
-            ins2(opm == J_FLTFR ? "cvtsi2ss" : "cvtsi2sd", R(r3), X(r1));
+        gen_float(op, r1, r3);
         return;
     case J_FIXFR: case J_FIXDR:
-        if (op & J_UNSIGNED) {
-            /* Use the x87 to convert to a 64-bit integer, truncating,  */
-            /* and take the low word.                                   */
-            int32 s = scratch_offset();
-            X86Op cw_old = op_mem(X86_EBP, -1, 0, s + 8);
-            X86Op cw_new = op_mem(X86_EBP, -1, 0, s + 10);
-            X86Op val = op_mem(X86_EBP, -1, 0, s);
-            ins2(opm == J_FIXFR ? "movss" : "movsd", X(r3), val);
-            ins1(opm == J_FIXFR ? "flds" : "fldl", val);
-            ins1("fnstcw", cw_old);
-            ins2("movzwl", cw_old, R(r1));
-            ins2("orl", op_imm(0x0c00), R(r1));    /* round to zero    */
-            ins2("movw", op_reg(hw(r1), 2), cw_new);
-            ins1("fldcw", cw_new);
-            ins1("fistpll", val);
-            ins1("fldcw", cw_old);
-            ins2("movl", val, R(r1));
-        } else
-            ins2(opm == J_FIXFR ? "cvttss2si" : "cvttsd2si", X(r3), R(r1));
+        gen_fix(op, r1, r3);
         return;
     case J_MOVIDR:                      /* r2 = low word, r3 = high word */
         {   int32 s = scratch_offset();
-            ins2("movl", R(r2), op_mem(X86_EBP, -1, 0, s));
-            ins2("movl", R(r3), op_mem(X86_EBP, -1, 0, s + 4));
-            ins2("movsd", op_mem(X86_EBP, -1, 0, s), X(r1));
+            insz2("mov", 4, Rn(r2, 4), op_mem(FPREG, -1, 0, s));
+            insz2("mov", 4, Rn(r3, 4), op_mem(FPREG, -1, 0, s + 4));
+            ins2("movsd", op_mem(FPREG, -1, 0, s), X(r1));
         }
         return;
     case J_MOVDIR:                      /* r1 = low word, r2 = high word */
         {   int32 s = scratch_offset();
-            ins2("movsd", X(r3), op_mem(X86_EBP, -1, 0, s));
-            ins2("movl", op_mem(X86_EBP, -1, 0, s), R(r1));
-            ins2("movl", op_mem(X86_EBP, -1, 0, s + 4), R(r2));
+            ins2("movsd", X(r3), op_mem(FPREG, -1, 0, s));
+            insz2("mov", 4, op_mem(FPREG, -1, 0, s), Rn(r1, 4));
+            insz2("mov", 4, op_mem(FPREG, -1, 0, s + 4), Rn(r2, 4));
         }
         return;
     case J_MOVFDR:                      /* float -> double */
@@ -879,10 +1229,10 @@ void show_instruction(Icode const *const ic)
         ins2("cvtsd2ss", X(r3), X(r1));
         return;
     case J_MOVIFR:                      /* int bits -> float reg */
-        ins2("movd", R(r3), X(r1));
+        ins2("movd", Rn(r3, 4), X(r1));
         return;
     case J_MOVFIR:                      /* float bits -> int reg */
-        ins2("movd", X(r3), R(r1));
+        ins2("movd", X(r3), Rn(r1, 4));
         return;
     }
     syserr("x86: unsupported jopcode %ld (%s)", (long)opm,
@@ -905,6 +1255,9 @@ void localcg_reinit(void)
     casetab_entries = 0;
     cmp_is_fp = NO;
     nsaved = framepad = 0;
+#ifdef TARGET_IS_X86_64
+    enter_desc = homesize = 0;
+#endif
     x86_fnlabel++;
 }
 
@@ -915,6 +1268,7 @@ void localcg_tidy(void)
 void mcdep_init(void)
 {   x86_negmask_used = NO;
     x86_two32_used = NO;
+    x86_two63_used = NO;
 }
 
 void setlabel(LabelNumber *l)

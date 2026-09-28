@@ -18,7 +18,8 @@
 
 extern int32 pcs_flags;
 
-/* Hardware register numbers (as used in instruction encodings).        */
+/* Hardware register numbers (as used in instruction encodings), named  */
+/* after the 32-bit registers.                                          */
 #define X86_EAX 0
 #define X86_ECX 1
 #define X86_EDX 2
@@ -27,6 +28,14 @@ extern int32 pcs_flags;
 #define X86_EBP 5
 #define X86_ESI 6
 #define X86_EDI 7
+#define X86_R8  8               /* x86-64 only                          */
+#define X86_R9  9
+#define X86_R10 10
+#define X86_R11 11
+#define X86_R12 12
+#define X86_R13 13
+#define X86_R14 14
+#define X86_R15 15
 
 /* Interface between gen.c and asm.c.                                   */
 extern void x86_asm_function(Symstr const *name);

@@ -13,6 +13,7 @@
 # ncc and n++ can be compiled to target different plaforms:
 #   TARGET=newton	              # Cross compiler targetting Apple Newton
 #   TARGET=i386	              # Cross compiler targeting i386 Linux (ELF, via as)
+#   TARGET=x86_64	              # Cross compiler targeting x86-64 Linux (ELF, via as)
 #
 #   TARGET=riscos	              # Cross compiler targeting 32-bit RISC OS
 #   TARGET=riscos26	            # Cross compiler targeting 26-bit RISC OS
@@ -26,7 +27,7 @@
 # Object files are built in ./build/ (obj/<target>/<host>)
 
 # config toggles ----------------
-TARGET      ?= arm          # arm | riscos | riscos26 | newton | i386
+TARGET      ?= arm          # arm | riscos | riscos26 | newton | i386 | x86_64
 WARN        ?= minimal      # some | minimal | none
 HOST        ?=              # riscos | <blank>
 CHECK       ?=              # asan | msan | <blank>
@@ -112,6 +113,7 @@ OPTIONS_riscos26 := ccacorn
 OPTIONS_riscos 	 := ccacorn
 OPTIONS_newton   := ccapple
 OPTIONS_i386     := cci386
+OPTIONS_x86_64   := ccx86_64
 
 # Determine the tool being built (ncc/n++/ntcc/nt++/interp/clbcomp)
 BUILD_TOOL := $(firstword $(filter ncc n++ ntcc nt++ interp clbcomp,$(MAKECMDGOALS)))
@@ -126,8 +128,8 @@ OPTIONS_DIR  := $(if $(filter arm,$(TARGET)),$(OPTIONS_DEFAULT_DIR),$(OPTIONS_OV
 
 # Select backend early, based on the requested build tool
 # thumb for ntcc/nt++, arm otherwise (can still be overridden by command line)
-# x86 for TARGET=i386.
-ifeq ($(TARGET),i386)
+# x86 for TARGET=i386 and x86_64.
+ifneq (,$(filter i386 x86_64,$(TARGET)))
 BACKEND ?= x86
 else
 BACKEND ?= $(if $(filter ntcc nt++,$(BUILD_TOOL)),thumb,arm)
@@ -214,6 +216,11 @@ endif
 ifeq ($(TARGET),i386)
 CFLAGS_TARGET += -DTARGET_IS_LINUX -DMSG_TOOL_NAME=\"$(BUILD_TOOL)\" \
                  -DNCC_RUNTIME_LIB=\"$(abspath $(LIB_DIR))/ncc-rt-i386.a\"
+endif
+
+# TARGET=x86_64
+ifeq ($(TARGET),x86_64)
+CFLAGS_TARGET += -DTARGET_IS_LINUX -DTARGET_IS_X86_64 -DMSG_TOOL_NAME=\"$(BUILD_TOOL)\"
 endif
 
 # TARGET != arm (ie. is one of riscos, riscos26 or newton)
@@ -383,9 +390,9 @@ CLIB_HDRS    += $(if $(filter riscos riscos26,$(TARGET)),$(CLIB_RISCOS_HDRS),)
 # Linux targets use the system's headers, except for those the compiler
 # must supply itself.
 CLIB_LINUX_HDRS := float.h limits.h stdarg.h stddef.h
-ifeq ($(TARGET),i386)
+ifneq (,$(filter i386 x86_64,$(TARGET)))
 CLIB_HDRS    := $(CLIB_LINUX_HDRS)
-CLIB_HDRS_DIR = external/clib/linux/i386/
+CLIB_HDRS_DIR = external/clib/linux/$(TARGET)/
 endif
 
 OPTIONS_DIR  := $(if $(filter arm,$(TARGET)),$(OPTIONS_DEFAULT_DIR),$(OPTIONS_OVERRIDE_DIR))

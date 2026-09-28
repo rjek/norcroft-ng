@@ -4986,7 +4986,9 @@ static Declarator *rd_formals_1(Declarator *a, const DeclFnAux *fnaux)
                                          syn_oldeformals,
                                          fnaux->flags,
                                          fnaux->val));
+#ifndef TARGET_VARIADIC_FP_ARGS_IN_FP_REGS
     if (fntypeisvariadic(d)) typefnaux_(d).flags |= f_nofpregargs;
+#endif
     return d;
 }
 

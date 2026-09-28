@@ -63,7 +63,13 @@ extern TypeExpr *g_te_fntype(TypeExpr *res, TypeExpr *a1, TypeExpr *a2,
                                             TypeExpr *a3, TypeExpr *a4,
                                             TypeExpr *a5);
 
-#define te_size_t (HasFeature(Feature_PCC) ? te_int : te_uint)
+#if sizeof_ptr == 8
+#  define te_size_t (HasFeature(Feature_PCC) ? te_lint : te_ulint)
+#  define te_ptrdiff_t te_lint
+#else
+#  define te_size_t (HasFeature(Feature_PCC) ? te_int : te_uint)
+#  define te_ptrdiff_t te_int
+#endif
 
 extern Binder *datasegment, *codesegment, *constdatasegment, *ddtorsegment;
 #ifdef TARGET_HAS_BSS

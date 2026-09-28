@@ -31,6 +31,18 @@ bool is_same(Expr *a,Expr *b);
 bool returnsstructinregs_t(TypeExpr *t);
 bool returnsstructinregs(Expr *fn);
 
+#ifdef TARGET_HAS_SYSV_AMD64_ABI
+/* The System V AMD64 psABI classes of the eightbytes of a struct.      */
+#define AMD64_NONE      0
+#define AMD64_INTEGER   1
+#define AMD64_SSE       2
+#define AMD64_MEMORY    3
+/* The number of eightbytes (1 or 2) of a struct of type t passed in    */
+/* registers, with their classes in cls[], or 0 if it is passed in      */
+/* memory.                                                              */
+extern int32 amd64_classify(TypeExpr *t, int32 cls[2]);
+#endif
+
 /* fields in mcrep result: */
 #define MCR_SIZE_MASK    0x007fffff
 #define MCR_SORT_MASK    0x07000000

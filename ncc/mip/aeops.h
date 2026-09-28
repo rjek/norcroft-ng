@@ -452,6 +452,10 @@ typedef enum AE_op {
 #define int_islonglong_(m) \
     (((m) & (bitoftype_(s_long) | bitoftype_(s_short))) ==\
      (bitoftype_(s_long)|bitoftype_(s_short)))
+/* A 64-bit integer type: long long, or long if that's 64 bits.         */
+#define int_is64bit_(m) \
+    (int_islonglong_(m) || \
+     (sizeof_long == 8 && ((m) & bitoftype_(s_long))))
 #define int_decodelength_(m) \
     (((m) & bitoftype_(s_short)) ? \
          (((m) & bitoftype_(s_long)) ? sizeof_longlong : sizeof_short) : \
