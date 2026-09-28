@@ -785,6 +785,31 @@ if (!(flags & FB_NOTYET))
     return NULL;
 }
 
+/* C11 anonymous struct and union members: they have invented names,    */
+/* and their members are found as if members of the enclosing class.    */
+/* The path is a single s_dot, whose offset is that of the member        */
+/* within the anonymous member plus that of the anonymous member.        */
+static Expr *path_through_anon_members(ClassMember *member, TagBinder *tb,
+                                       int flags)
+{   ClassMember *l;
+    for (l = tagbindmems_(tb); l != NULL; l = memcdr_(l))
+    {   TypeExpr *t;
+        TagBinder *ab;
+        Expr *e;
+        if (h0_(l) != s_member || !isgensym(memsv_(l))) continue;
+        t = princtype(memtype_(l));
+        if (!isclasstype_(t)) continue;
+        ab = typespectagbind_(t);
+        e = path_to_member_1(member, ab, flags, NULL, NULL);
+        if (e == NULL) e = path_through_anon_members(member, ab, flags);
+        if (e != NULL && h0_(e) == s_dot)
+        {   exprdotoff_(e) += memwoff_(l);
+            return e;
+        }
+    }
+    return NULL;
+}
+
 Expr *path_to_member(ClassMember *member, TagBinder *b, int flags)
 {   Expr *e;
     if (b == 0 || !isclasstagbinder_(b))
@@ -806,7 +831,10 @@ Expr *path_to_member(ClassMember *member, TagBinder *b, int flags)
             e = arg2_(e);
     }
     else
-        e = path_to_member_1(member, b, flags, NULL, NULL);
+    {   e = path_to_member_1(member, b, flags, NULL, NULL);
+        if (e == NULL && h0_(member) == s_identifier)
+            e = path_through_anon_members(member, b, flags);
+    }
     return e;
 }
 

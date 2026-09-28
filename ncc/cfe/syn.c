@@ -4588,6 +4588,17 @@ static TopDecl *rd_decl(int declflag, SET_BITMAP accbits)
             declflag |= ANONU;
             goto anonu;
         }
+        else if (!LanguageIsCPlusPlus &&
+                 (declflag & MEMBER) &&
+                 !(ds.stg & bitofstg_(s_typedef)) &&
+                 (isprimtype_(t, s_union) || isprimtype_(t, s_struct)) &&
+                 isgensym(bindsym_(typespectagbind_(t))) &&
+                 tagbindmems_(typespectagbind_(t)) != NULL)
+        {   /* C11 anonymous struct or union member: give it an invented */
+            /* name; path_to_member() finds the members within it.       */
+            declflag |= ANONU;
+            goto anonu;
+        }
         else if ((declflag & TEMPLATE) &&
                 !(isclasstype_(t) ||
                   (!(ds.stg & bitofstg_(s_typedef)) && isfntype(t))))
