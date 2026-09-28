@@ -1339,7 +1339,8 @@ static void flush_arg_usedregs(int32 argaddr)
              usedregs != NULL;
              usedregs = rl_discard(usedregs))
     {   VRegnum r = usedregs->rlcar;
-        if (!((unsigned32)((r)-R_A1) < (unsigned32)NARGREGS))
+        /* If NARGREGS is 0, stack args are still evaluated into R_A1.  */
+        if (!((unsigned32)((r)-R_A1) < (unsigned32)(NARGREGS==0 ? 1 : NARGREGS)))
             syserr(syserr_bad_reg, (long)r);
 /* @@@ perhaps J_PUSHR should mean "push alignof_toplevel size binder.  */
         emit(J_PUSHR, r, GAP, argaddr -= alignof_toplevel_auto);

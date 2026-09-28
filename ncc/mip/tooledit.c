@@ -1,6 +1,7 @@
-/* ARM and Thumb C compilers: file tooledit.c
+/* C compiler file mip/tooledit.c
  * Copyright (C) 1996 Advanced RISC Machines Limited. All rights reserved.
- * Common tooledit code for arm and thumb.
+ * Common tooledit code.  ARM and Thumb have extra -cpu/-arch/-apcs
+ * handling.
  * SPDX-Licence-Identifier: Apache-2.0
  */
 
@@ -79,7 +80,7 @@ static EnvInit const nofp_implies[] =    { { "-D__APCS_NOFP", "?"}, {0, 0} };
 static EnvInit const softfp_implies[] =  { { "-D__SOFTFP__", "?"}, { "-D__SOFT_DOUBLES__", "?"}, {0, 0} };
 static EnvInit const softd_implies[] =   { { "-D__SOFTFP__", "="}, { "-D__SOFT_DOUBLES__", "?"}, {0, 0} };
 static EnvInit const nofpr_implies[]  =  { { "-D__PCS_FPREGARGS", "="}, {0, 0} };
-#ifndef TARGET_IS_THUMB
+#ifdef TARGET_IS_ARM
 static EnvInit const b26_implies[] =     { { "-D__APCS_32", "="}, {0, 0} };
 static EnvInit const fp_implies[] =      { { "-D__APCS_NOFP", "="}, {0, 0} };
 static EnvInit const hardfp_implies[] =  { { "-D__SOFTFP__", "="}, { "-D__SOFT_DOUBLES__", "="}, {0, 0} };
@@ -94,7 +95,7 @@ static EnvValImplies const swst_vals[] = { {"#/swst", swst_implies}, {"#/noswst"
 static EnvValImplies const reent_vals[] = { {"#/reent", reent_implies}, {"#/noreent", noreent_implies}, {NULL, NULL} };
 static EnvValImplies const inter_vals[] = { {"#/interwork", inter_implies}, {"#/nointerwork", nointer_implies}, {NULL, NULL} };
 static EnvValImplies const sex_vals[] = { {"=-bi", bi_implies}, {"=-li", li_implies}, {NULL, NULL} };
-#ifndef TARGET_IS_THUMB
+#ifdef TARGET_IS_ARM
 static EnvValImplies const softfp_vals[] = { {"#/softfp", softfp_implies}, {"#/hardfp", hardfp_implies},
                                              {"#/softdoubles", softd_implies}, {NULL, NULL} };
 static EnvValImplies const fpr_vals[] = { {"#/fpregargs", fpr_implies}, {"#/nofpregargs", nofpr_implies}, {NULL, NULL} };
@@ -144,7 +145,7 @@ static KnownVals const known[] = {
   {"-apcs.reent",  reent_vals },
   {"-apcs.inter",  inter_vals },
   {".bytesex",     sex_vals },
-#ifndef TARGET_IS_THUMB
+#ifdef TARGET_IS_ARM
   {"-apcs.softfp", softfp_vals },
   {"-apcs.fpr",    fpr_vals },
   {"-apcs.fp",     fp_vals },
@@ -284,7 +285,7 @@ ToolEdit_InsertStatus tooledit_insertwithjoin(
   if (join != '=' && join != '#') {
     if (join != '?' || value[0] != 0) return TE_Failed;
   }
-#ifndef TARGET_IS_THUMB
+#ifdef TARGET_IS_ARM
   if (StrEq(name, "-cpu") || StrEq(name, "-arch")) {
     char a[32], c[32];
     Processor const *cpu;
@@ -370,9 +371,11 @@ ToolEdit_InsertStatus tooledit_insertwithjoin(
     status = TE_OKBut;
   } else if (StrEq(name, "-zi")) {
     if (join != '=' || !CheckRange(value, 1, 4)) return TE_Failed;
+#ifdef LDM_REGCOUNT_MAX_DEFAULT
   } else if (StrEq(name, "-zr")) {
     if (join != '=' || !CheckRange(value, LDM_REGCOUNT_MIN_DEFAULT, LDM_REGCOUNT_MAX_DEFAULT))
       return TE_Failed;
+#endif
   } else if (StrEq(name, "-zas") || StrEq(name, "-zat")) {
     if (join != '=' || !CheckAlignValue(value))
       return TE_Failed;
@@ -450,7 +453,7 @@ static int valuecount_doarch(void) {
 static int enumvalues_doarch(ToolEnvItemFn *f, void *arg) {
   return f(arg, "-arch", "#4T");
 }
-#else
+#elif defined TARGET_IS_ARM
 
 static int countvalues_cpus(void *arg, Processor const *cpu) {
   (*(int *)arg)++;
@@ -508,6 +511,24 @@ static int enumvalues_doarch(ToolEnvItemFn *f, void *arg) {
     int rc = f(arg, "-arch", er.name[i]);
     if (rc != 0) return rc;
   }
+  return 0;
+}
+#else
+static int valuecount_docpu(void) {
+    return 0;
+}
+
+static int enumvalues_docpu(ToolEnvItemFn *f, void *arg) {
+  IGNORE(f); IGNORE(arg);
+  return 0;
+}
+
+static int valuecount_doarch(void) {
+    return 0;
+}
+
+static int enumvalues_doarch(ToolEnvItemFn *f, void *arg) {
+  IGNORE(f); IGNORE(arg);
   return 0;
 }
 #endif

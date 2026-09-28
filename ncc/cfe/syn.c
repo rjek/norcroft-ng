@@ -322,7 +322,8 @@ static char lpriovec[s_NUMSYMS];
 #define rprio_(op) (lpriovec[op] | 1)
 
 /* Peter Armistead - Make it compile */
-#ifdef CALLABLE_COMPILER
+/* Also used by targets without an inline assembler.                    */
+#if defined CALLABLE_COMPILER || !defined TARGET_HAS_INLINE_ASSEMBLER
 Expr *rd_asm_decl(void)
 {
     return (Expr*) 0;   /* Temporary - currently asm is implemented as a command rather then a declaration... */

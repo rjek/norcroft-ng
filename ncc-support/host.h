@@ -24,12 +24,6 @@
   #define COMPILING_ON_UNIX 1
 #endif
 
-#define TARGET_HAS_DEBUGGER 1
-#define TARGET_HAS_AOF 1
-
-#define TARGET_HAS_DIVREM_FUNCTION 1
-#define TARGET_HAS_DIV_10_FUNCTION 1
-
 #define FALSE 0
 #define TRUE 1
 #define NO 0

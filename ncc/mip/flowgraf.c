@@ -881,7 +881,7 @@ case J_STRING:
  * point.
  */
 case J_ADCOND:
-        {   int32 offset = data.size;
+        {   int32 offset = data_size();
             gendcE(8, ic.r3.f);
             padstatic(alignof_toplevel_static);
             ic.op = J_ADCON;
@@ -891,7 +891,7 @@ case J_ADCOND:
             return;
         }
 case J_ADCONF:
-        {   int32 offset = data.size;
+        {   int32 offset = data_size();
             gendcE(4, ic.r3.f);
             padstatic(alignof_toplevel_static);
             ic.op = J_ADCON;

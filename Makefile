@@ -283,7 +283,7 @@ CPPFE_SRCS := \
 ARM_THUMB_SRCS := \
   armthumb/aaof.c armthumb/arminst.c armthumb/asd.c \
   armthumb/asmcg.c armthumb/asmsyn.c armthumb/dwasd.c \
-  armthumb/tooledit.c
+  mip/tooledit.c
 
 ARM_SRCS   := \
   $(ARM_THUMB_SRCS) arm/asm.c arm/gen.c arm/mcdep.c arm/peephole.c

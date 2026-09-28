@@ -92,7 +92,9 @@
 #include "builtin.h"  /* sim */
 #include "aeops.h"    /* bitofstg_(), s_register - sigh */
 #include "sr.h"
+#ifdef TARGET_IS_ARM_OR_THUMB
 #include "armops.h"
+#endif
 #include "inlnasm.h"
 
 static uint32 warn_corrupted_regs;
@@ -1355,6 +1357,7 @@ VRegSetP exitregset(VRegnum result, VRegSetP s)
         for (n = 1; n < currentfunction.nresultregs; n++)
             s = reference_register(result + n, ALLBITS, s, NULL);
     }
+#ifdef TARGET_IS_ARM_OR_THUMB
     if (pcs_flags & PCS_NOFP)
         s = reference_register(R_SP, ALLBITS, s, NULL); /* SP or FP alive on exit */
     else
@@ -1363,6 +1366,9 @@ VRegSetP exitregset(VRegnum result, VRegSetP s)
         s = reference_register(R_SL, ALLBITS, s, NULL); /* SL alive if stackchecking */
     if (pcs_flags & PCS_REENTRANT)
         s = reference_register(R_SB, ALLBITS, s, NULL); /* SB alive if reentrant */
+#else
+    s = reference_register(R_SP, ALLBITS, s, NULL);     /* SP alive on exit */
+#endif
     return s;
 }
 
@@ -1518,7 +1524,6 @@ static VRegSetP add_instruction_info(VRegSetP s1, Icode *ic, UPtr *deadp, bool r
                 }
             }
         }
-#ifdef TARGET_IS_ARM_OR_THUMB
         {
             RealRegUse reg;
             RealRegSet_MapArg a; a.vr = s1;
@@ -1530,7 +1535,6 @@ static VRegSetP add_instruction_info(VRegSetP s1, Icode *ic, UPtr *deadp, bool r
                 map_RealRegSet(&reg.use, use_f, &a);
             s1 = a.vr; /* copy altered set back! */
         }
-#endif
         return instruction_ref_info(s1, ic, deadp, ALLBITS);
 }
 
@@ -1623,9 +1627,7 @@ static void collect_register_clashes(BlockHead *p)
     VRegSetP s1 = successor_regs(p);
     Icode *const q = blkcode_(p);
     int32 w;
-#ifdef TARGET_IS_ARM_OR_THUMB
     RealRegUse reg;
-#endif
     thisBlocksBindList = blkstack_(p);
 
     if (usrdbg(DBG_VAR) && !usrdbg(DBG_OPT_REG)) {
@@ -1653,13 +1655,11 @@ static void collect_register_clashes(BlockHead *p)
         bool live_psr = NO;
 /* Obviously, if TARGET_SHARES_INTEGER_AND_FP_REGISTERS then J_MOVDIR   */
 /* could make some optimisations...                                     */
-#ifdef TARGET_IS_ARM_OR_THUMB
         RealRegisterUse(ic, &reg);
         if (nonempty_RealRegSet(&reg.c_out, INTREG)) {
             RealRegSet_MapArg a; a.vr = s1;
             map_RealRegSet(&reg.c_out, crc_f1, &a);
         }
-#endif
         if (sets_psr(ic))
             s1 = live_delete(R_PSR, s1, &live_psr);
         if (updates_r2(op) && !live_member(ic->r2.r, s1))
@@ -1877,7 +1877,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
 #endif
 #endif
 
-
 #ifdef TARGET_HAS_2ADDRESS_CODE
 #  ifdef AVOID_THE_ACN_ADJUSTMENT_MADE_HERE
         if (jop_asymdiadr_(op) && ic->r2.r != ic->r3.r) add_clash(ic->r1.r, ic->r3.r);
@@ -1902,7 +1901,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
         }
 #  endif
 #endif
-#ifdef TARGET_IS_ARM_OR_THUMB
         {
             RealRegUse reg;
             RealRegSet_MapArg a; a.vr = s1;
@@ -1914,7 +1912,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
                 map_RealRegSet(&reg.use, use_f_reg, &a);
             s1 = a.vr; /* copy altered set back! */
         }
-#endif
         s1 = instruction_ref_info(s1, ic, NULL, demand);
 
 /* The following things that allow for workspace registers MUST be done  */
@@ -1931,11 +1928,11 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
             reg.c_in.map[0] &= ~regbit(R_LR);
             corrupt_register(R_LR, s1);
         }
+#endif
         if (nonempty_RealRegSet(&reg.c_in, INTREG))
         {   RealRegSet_MapArg a; a.vr = s1;
             map_RealRegSet(&reg.c_in, crc_f1, &a);
         }
-#endif
     }
     vregset_discard(s1);
     if (debugging(DEBUG_REGS))

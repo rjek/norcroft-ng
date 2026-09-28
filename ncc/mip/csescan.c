@@ -3335,9 +3335,7 @@ static void cse_scanblock(BlockHead *block)
   blocksetup();
   ImportLocVals(block);
   for (c = blkcode_(block), limit = c + blklength_(block); c < limit; ++c) {
-#ifdef TARGET_IS_ARM_OR_THUMB
     RealRegUse reg;
-#endif
     ExSet *values = NULL;
     ExSet *values2 = NULL;
     ExSet *valuesToStore;
@@ -3683,8 +3681,11 @@ static void cse_scanblock(BlockHead *block)
                   /* either the div case of the above, or a function      */
                   /* returning a single result in multiple registers.     */
                   /* k_resultregs can't distinguish.                      */
-                if (r3.ex == arg1_(sim.div10fn) || r3.ex == arg1_(sim.udiv10fn)
-                    || r3.ex == arg1_(sim.divfn) || r3.ex == arg1_(sim.udivfn))
+                if (
+#ifdef TARGET_HAS_DIV_10_FUNCTION
+                    r3.ex == arg1_(sim.div10fn) || r3.ex == arg1_(sim.udiv10fn) ||
+#endif
+                    r3.ex == arg1_(sim.divfn) || r3.ex == arg1_(sim.udivfn))
                   values = FindCallSet(r3.b, vregsort(r1.r), r2.i, arg);
                 else {
                   values = Find2ResCallSet(&values2, r3.b, vregsort(r1.r), r2.i, arg, c);
@@ -4713,7 +4714,6 @@ BinaryR:
     if (corrupts_r2(c))
         cse_corrupt_register(r2.r);
 
-#ifdef TARGET_IS_ARM_OR_THUMB
     {
         /* Mark all registers which are either written or corrupted as 'corrupted'.
          * This is because CSE marks all registers with an unknown value as corrupted.
@@ -4725,7 +4725,6 @@ BinaryR:
         map_RealRegSet(&reg.c_out, corrupt_f, NULL);
         map_RealRegSet(&reg.def, corrupt_f, NULL);
     }
-#endif
 
     if (values == NULL && node != NULL)
       values = ExprnToSet(node);

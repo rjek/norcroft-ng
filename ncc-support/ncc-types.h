@@ -21,10 +21,14 @@
 #include <stdint.h>
 
 #if defined(__CC_NORCROFT)
+#  define inline __inline
+#endif
+
+/* Norcroft's own <stdint.h> only has 64-bit types in some modes.       */
+#if defined(__CC_NORCROFT) && !defined(INT64_MAX)
 typedef __int64 int64_t;
 typedef unsigned __int64 uint64_t;
 typedef signed int ssize_t;
-#  define inline __inline
 #  define INT64_MAX        9223372036854775807LL
 #  define UINT64_MAX       18446744073709551615ULL
 #  define INT64_MIN        (-INT64_MAX-1)
