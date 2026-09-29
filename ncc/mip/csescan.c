@@ -4586,7 +4586,8 @@ BinaryR:
               CSE_EvalBinary_I(J_RTOK(UnshiftedOp(op)), &atmp, c1->exprn, a2)) {
             r3.i = atmp;
             goto ForgeMOVK;
-          } else if (jop_canRTOK(UnshiftedOp(op))) {
+          } else if (jop_canRTOK(UnshiftedOp(op)) &&
+                     immed_op(a2, J_RTOK(UnshiftedOp(op)))) {
             op = UnshiftedOp(op);
             r3.i = a2;
             goto ForgeIOpK;
@@ -4594,7 +4595,8 @@ BinaryR:
         }
         if (!OpIsShifted(op) && j_is_commutative(op)) {
           ExSet *c1 = MOVKinSet(e1);
-          if (c1 != NULL && jop_canRTOK(op)) {
+          if (c1 != NULL && jop_canRTOK(op) &&
+              immed_op(e1k_(c1->exprn), J_RTOK(op))) {
             e1 = e2;
             c->r2.r = r2.r = r3.r;
             r3.i = e1k_(c1->exprn);

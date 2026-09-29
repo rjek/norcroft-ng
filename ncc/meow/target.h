@@ -151,6 +151,10 @@ extern int32 pcs_flags;
  * The same construct breaks the ARM compiler; this only avoids it. */
 #define TARGET_LACKS_2RESULT_CSE 1
 
+/* which constants are cheap as immediates; the rest may be hoisted */
+#define immed_op(n, op) meow_immed_op(n, op)
+extern bool meow_immed_op(int32 n, int32 op);
+
 #define LDM_REGCOUNT_MAX_DEFAULT 16
 #define LDM_REGCOUNT_MIN_DEFAULT  3
 

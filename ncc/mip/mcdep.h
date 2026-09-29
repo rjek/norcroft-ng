@@ -123,6 +123,7 @@ void localcg_endcode(void);
 
 extern void show_instruction(Icode const *const ic);
 extern Icode const *cg_next_icode;
+extern int32 cg_next_count;      /* icodes left in the block after it */
 
 extern void localcg_reinit(void);       /* under threat (use J_ENTER)   */
 extern void localcg_tidy(void);         /* ditto (use J_ENDPROC)        */

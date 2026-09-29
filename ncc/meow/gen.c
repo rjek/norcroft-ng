@@ -209,6 +209,11 @@ static void out_cmpr(RealRegister rn, RealRegister rm)
     outHW(MEOW_ENCODE_CMPR(rn, 0, 0, rm));
 }
 
+static void out_tst(RealRegister rn, int bit)
+{
+    outHW(MEOW_ENCODE_TST(rn, 0, bit));
+}
+
 static void out_b(int cond, int32 halfwords)
 {
     outHW(MEOW_ENCODE_B(cond, (uint32_t)halfwords));
@@ -682,9 +687,54 @@ static void load_string(RealRegister rd, StringSegList *s, int32 extra)
 
 /* ---- copies that the next instruction can do without ---------------------- */
 
+static bool skip_next, skip_after_next;
+
+/* rd = rs & (1 << b) followed by an equality test of rd against zero
+ * where rd dies: TST rs, #bit does the lot. */
+static bool test_bit(RealRegister rd, RealRegister rs, int32 mask)
+{
+    Icode const *n = cg_next_icode;
+    int bit = bit_index((uint32_t)mask);
+    int32 cond;
+
+    if (n == NULL || bit < 0) return NO;
+    if ((n->op & J_TABLE_BITS) != J_CMPK || n->r3.i != 0) return NO;
+    if (register_number(n->r2.r) != rd || (n->op & J_DEAD_R2) == 0) return NO;
+    cond = n->op & Q_MASK & ~Q_UBIT;
+    if (cond != Q_EQ && cond != Q_NE) return NO;
+    out_tst(rs, bit);
+    skip_next = YES;
+    return YES;
+}
+
 /* MOV rd, rs followed by an instruction that reads rd for the last time
  * and does not write it: the reader uses rs instead and the copy goes. */
 static RealRegister fwd_from = NoRegister, fwd_to;
+
+/* MOV rd, rs; rs = rd +- k; CMP rd, #c with rd dying there, which is what
+ * "n-- > 0" comes out as: compare rs before stepping it and lose the
+ * copy. Nothing between sets or reads the flags. */
+static bool step_after_test(RealRegister rd, RealRegister rs)
+{
+    Icode const *n = cg_next_icode, *n2;
+    J_OPCODE nop;
+
+    if (n == NULL || cg_next_count < 2 || rd == rs) return NO;
+    n2 = n + 1;
+    nop = n->op & J_TABLE_BITS;
+    if (nop != J_ADDK && nop != J_SUBK) return NO;
+    if (register_number(n->r1.r) != rs || register_number(n->r2.r) != rd)
+        return NO;
+    if ((n2->op & J_TABLE_BITS) != J_CMPK || (n2->op & J_DEAD_R2) == 0 ||
+        register_number(n2->r2.r) != rd)
+        return NO;
+    if (n2->r3.i < -128 || n2->r3.i > 127) return NO;
+    out_cmpk(rs, n2->r3.i);
+    fwd_from = rd;
+    fwd_to = rs;
+    skip_after_next = YES;
+    return YES;
+}
 
 static bool forward_copy(RealRegister rd, RealRegister rs)
 {
@@ -1099,7 +1149,6 @@ static bool is_ldrk_strk(J_OPCODE op)
 
 /* A plain access through rb followed by rb += size (or -= size) is one
  * post-indexed access.  The second instruction is then skipped. */
-static bool skip_next;
 
 static bool fuse_post(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
 {
@@ -1341,8 +1390,12 @@ static void show_instruction_1(const Icode *const ic)
     int32 q = op & Q_MASK;
 
     if (skip_next) {
-        skip_next = NO;
-        return;                         /* already done by the previous one */
+        skip_next = NO;                 /* already done by the previous one */
+        return;
+    }
+    if (skip_after_next) {
+        skip_after_next = NO;
+        skip_next = YES;
     }
     if (fwd_from != NoRegister) {
         if (reads_r1(op1) && r1 == fwd_from) r1 = fwd_to;
@@ -1393,6 +1446,7 @@ case J_MOVK:
         load_integer(r1, mi);
         break;
 case J_MOVR:
+        if (step_after_test(r1, mr)) break;
         if (forward_copy(r1, mr)) break;
         out_mov(r1, mr);
         break;
@@ -1426,7 +1480,10 @@ case J_RSBK:
             out_add3(YES, r1, r2, 0);
         }
         break;
-case J_ANDK: bit_integer(1, r1, r2, mi); break;
+case J_ANDK:
+        if (test_bit(r1, r2, mi)) break;
+        bit_integer(1, r1, r2, mi);
+        break;
 case J_ORRK: bit_integer(2, r1, r2, mi); break;
 case J_EORK: bit_integer(3, r1, r2, mi); break;
 case J_MULK:

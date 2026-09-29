@@ -229,4 +229,35 @@ bool immed_cmp(int32 n)
     return n >= -128 && n <= 127;
 }
 
+static bool one_bit(uint32_t v)
+{
+    return v != 0 && (v & (v - 1)) == 0;
+}
+
+/* Constants the backend folds into one instruction (two for a mask).
+ * Anything else is worth a register when the loop optimiser can spare
+ * one, since building it costs up to eight instructions every time. */
+bool meow_immed_op(int32 n, int32 op)
+{
+    uint32_t v = (uint32_t)n;
+
+    switch (op & J_TABLE_BITS) {
+    case J_ADDK:
+    case J_SUBK:
+        return n >= -2047 && n <= 2047;
+    case J_CMPK:
+        return immed_cmp(n);
+    case J_ANDK:
+        return n == 0 || n == -1 || one_bit(v) || one_bit(~v) ||
+               one_bit(v + 1) || one_bit(~v + 1);
+    case J_ORRK:
+    case J_EORK:
+        return n == 0 || one_bit(v);
+    case J_MOVK:
+        return n >= -2048 && n <= 2047;
+    default:
+        return YES;
+    }
+}
+
 /* end of meow/mcdep.c */

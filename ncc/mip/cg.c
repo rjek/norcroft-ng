@@ -4137,6 +4137,16 @@ static VRegnum cg_binary_1(J_OPCODE op, Expr *a1, Expr *a2,
             }
         }
         /* @@@ do similar things for div/rem by 0? */
+        if (op != J_NOOP && !jop_iscmp_(op) && !jop_isregshift_(op) &&
+            !immed_op(n, J_RTOK(op)))
+        {   /* a constant the target cannot fold in: load it separately,
+               so CSE can share it and hoist it out of loops */
+            VRegnum r2 = fgetregister(INTREG);
+            emit(J_MOVK, r2, GAP, n);
+            emitreg(op+cond, targetreg, r1, r2);
+            bfreeregister(r2);
+            op = J_NOOP;
+        }
         if (op != J_NOOP) emit(J_RTOK(op+cond), targetreg, r1, n);
         bfreeregister(r1);
         return targetreg;

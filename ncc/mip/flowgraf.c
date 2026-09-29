@@ -1034,6 +1034,7 @@ static BlockHead *prevblock;
 /* The instruction after the one being shown, for a backend that fuses
  * neighbours; NULL at the end of a block or outside one. */
 Icode const *cg_next_icode;
+int32 cg_next_count;
 
 static void show_basic_block(BlockHead *p, uint32 cond)
 {
@@ -1079,8 +1080,10 @@ static void show_basic_block(BlockHead *p, uint32 cond)
                 }
         }
         cg_next_icode = b1 + 1 < len ? &b[b1 + 1] : NULL;
+        cg_next_count = len - b1 - 1;
         expand_jop_macro(&ic);
         cg_next_icode = NULL;
+        cg_next_count = 0;
     }
     prevblock = p;
 }
@@ -3082,7 +3085,11 @@ static LabelNumber *dump_flowgraph(LabelNumber *pending_branch, int32 lifted)
         if ( (blkflags_(p) & BLKEMPTY)
              && (!usrdbg(DBG_LINE+DBG_VAR) || usrdbg(DBG_OPT_DEAD)))
           syserr(syserr_live_empty_block, (long)lab_name_(w));
-        if (pending_branch != NOTALAB && pending_branch != w)
+        /* no branch round an empty block that only falls into the target */
+        if (pending_branch != NOTALAB && pending_branch != w &&
+            !(target_stack_moves_once && blklength_(p) == 0 &&
+              !(blkflags_(p) & (BLKSWITCH|BLK2EXIT|BLK0EXIT)) &&
+              blknext_(p) == pending_branch))
           show_branch_instruction(J_B, pending_branch);
         if (blkflags_(p) & BLKSWITCH)
         { LabelNumber **v = blktable_(p);
