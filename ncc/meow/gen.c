@@ -1129,11 +1129,14 @@ static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off,
         }
         return;
     }
-    out_mem(store, rv, ra, size, NO, wb);
-    if (!store && (op & J_SIGNED)) {
-        if (size == 1) sign_extend(rv, 8);
-        else if (size == 2) sign_extend(rv, 16);
+    if (!store && (op & J_SIGNED) && size == 2) {
+        /* into the top half, then one arithmetic shift sign extends */
+        out_mem(NO, rv, ra, 2, YES, wb);
+        out_shift(rv, YES, NO, NO, 16);
+        return;
     }
+    out_mem(store, rv, ra, size, NO, wb);
+    if (!store && (op & J_SIGNED) && size == 1) sign_extend(rv, 8);
 }
 
 static bool is_ldrk_strk(J_OPCODE op)
