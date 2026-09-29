@@ -61,7 +61,6 @@ static const struct meow_field fields_LDI[] = {
 };
 
 static const struct meow_field fields_SHI[] = {
-	{ "arith", 12, 1, MEOW_FK_FLAG },
 	{ "rd", 8, 4, MEOW_FK_REG },
 	{ "left", 7, 1, MEOW_FK_FLAG },
 	{ "rot", 6, 1, MEOW_FK_FLAG },
@@ -69,10 +68,31 @@ static const struct meow_field fields_SHI[] = {
 };
 
 static const struct meow_field fields_SHR[] = {
-	{ "arith", 12, 1, MEOW_FK_FLAG },
 	{ "rd", 8, 4, MEOW_FK_REG },
 	{ "left", 7, 1, MEOW_FK_FLAG },
 	{ "rot", 6, 1, MEOW_FK_FLAG },
+	{ "rs", 0, 4, MEOW_FK_REG },
+};
+
+static const struct meow_field fields_ASRI[] = {
+	{ "rd", 8, 4, MEOW_FK_REG },
+	{ "imm", 0, 5, MEOW_FK_UIMM },
+};
+
+static const struct meow_field fields_ASRR[] = {
+	{ "rd", 8, 4, MEOW_FK_REG },
+	{ "rs", 0, 4, MEOW_FK_REG },
+};
+
+static const struct meow_field fields_ADDSI[] = {
+	{ "rd", 8, 4, MEOW_FK_REG },
+	{ "sub", 6, 1, MEOW_FK_FLAG },
+	{ "imm", 0, 5, MEOW_FK_UIMM },
+};
+
+static const struct meow_field fields_ADDSR[] = {
+	{ "rd", 8, 4, MEOW_FK_REG },
+	{ "sub", 6, 1, MEOW_FK_FLAG },
 	{ "rs", 0, 4, MEOW_FK_REG },
 };
 
@@ -111,8 +131,12 @@ const struct meow_enc_desc meow_encs[MEOW_ENC_COUNT] = {
 	{ "TST", "0111nnnn10wbbbbb", 0xf0c0, 0x7080, 3, fields_TST },
 	{ "MOV", "1000ddddbhwxssss", 0xf000, 0x8000, 6, fields_MOV },
 	{ "LDI", "1001iiiiiiiiiiii", 0xf000, 0x9000, 1, fields_LDI },
-	{ "SHI", "101arrrrdR0iiiii", 0xe020, 0xa000, 5, fields_SHI },
-	{ "SHR", "101arrrrdR10ssss", 0xe030, 0xa020, 5, fields_SHR },
+	{ "SHI", "1010rrrrdR0iiiii", 0xf020, 0xa000, 4, fields_SHI },
+	{ "SHR", "1010rrrrdR10ssss", 0xf030, 0xa020, 4, fields_SHR },
+	{ "ASRI", "1011rrrr000iiiii", 0xf0e0, 0xb000, 2, fields_ASRI },
+	{ "ASRR", "1011rrrr0010ssss", 0xf0f0, 0xb020, 2, fields_ASRR },
+	{ "ADDSI", "1011dddd1s0iiiii", 0xf0a0, 0xb080, 3, fields_ADDSI },
+	{ "ADDSR", "1011dddd1s10rrrr", 0xf0b0, 0xb0a0, 3, fields_ADDSR },
 	{ "BITR", "110nddddoo00ssss", 0xe030, 0xc000, 4, fields_BITR },
 	{ "BITI", "110nddddoo1bbbbb", 0xe020, 0xc020, 4, fields_BITI },
 	{ "MEM", "111LvvvvSHWDaaaa", 0xe000, 0xe000, 7, fields_MEM },

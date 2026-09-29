@@ -18,6 +18,10 @@ enum meow_enc {
 	MEOW_ENC_LDI,
 	MEOW_ENC_SHI,
 	MEOW_ENC_SHR,
+	MEOW_ENC_ASRI,
+	MEOW_ENC_ASRR,
+	MEOW_ENC_ADDSI,
+	MEOW_ENC_ADDSR,
 	MEOW_ENC_BITR,
 	MEOW_ENC_BITI,
 	MEOW_ENC_MEM,
@@ -238,12 +242,9 @@ static inline int32_t meow_sext(uint32_t v, unsigned w)
 	((uint16_t)(0x9000u \
 	| (((uint32_t)(imm) & 0xfffu) << 0)))
 
-/* SHI: 101arrrrdR0iiiii */
-#define MEOW_SHI_MASK 0xe020
+/* SHI: 1010rrrrdR0iiiii */
+#define MEOW_SHI_MASK 0xf020
 #define MEOW_SHI_MATCH 0xa000
-#define MEOW_SHI_ARITH_SHIFT 12
-#define MEOW_SHI_ARITH_WIDTH 1
-#define MEOW_SHI_ARITH(w) (((w) >> 12) & 0x1)
 #define MEOW_SHI_RD_SHIFT 8
 #define MEOW_SHI_RD_WIDTH 4
 #define MEOW_SHI_RD(w) (((w) >> 8) & 0xf)
@@ -256,20 +257,16 @@ static inline int32_t meow_sext(uint32_t v, unsigned w)
 #define MEOW_SHI_IMM_SHIFT 0
 #define MEOW_SHI_IMM_WIDTH 5
 #define MEOW_SHI_IMM(w) (((w) >> 0) & 0x1f)
-#define MEOW_ENCODE_SHI(arith, rd, left, rot, imm) \
+#define MEOW_ENCODE_SHI(rd, left, rot, imm) \
 	((uint16_t)(0xa000u \
-	| (((uint32_t)(arith) & 0x1u) << 12) \
 	| (((uint32_t)(rd) & 0xfu) << 8) \
 	| (((uint32_t)(left) & 0x1u) << 7) \
 	| (((uint32_t)(rot) & 0x1u) << 6) \
 	| (((uint32_t)(imm) & 0x1fu) << 0)))
 
-/* SHR: 101arrrrdR10ssss */
-#define MEOW_SHR_MASK 0xe030
+/* SHR: 1010rrrrdR10ssss */
+#define MEOW_SHR_MASK 0xf030
 #define MEOW_SHR_MATCH 0xa020
-#define MEOW_SHR_ARITH_SHIFT 12
-#define MEOW_SHR_ARITH_WIDTH 1
-#define MEOW_SHR_ARITH(w) (((w) >> 12) & 0x1)
 #define MEOW_SHR_RD_SHIFT 8
 #define MEOW_SHR_RD_WIDTH 4
 #define MEOW_SHR_RD(w) (((w) >> 8) & 0xf)
@@ -282,12 +279,75 @@ static inline int32_t meow_sext(uint32_t v, unsigned w)
 #define MEOW_SHR_RS_SHIFT 0
 #define MEOW_SHR_RS_WIDTH 4
 #define MEOW_SHR_RS(w) (((w) >> 0) & 0xf)
-#define MEOW_ENCODE_SHR(arith, rd, left, rot, rs) \
+#define MEOW_ENCODE_SHR(rd, left, rot, rs) \
 	((uint16_t)(0xa020u \
-	| (((uint32_t)(arith) & 0x1u) << 12) \
 	| (((uint32_t)(rd) & 0xfu) << 8) \
 	| (((uint32_t)(left) & 0x1u) << 7) \
 	| (((uint32_t)(rot) & 0x1u) << 6) \
+	| (((uint32_t)(rs) & 0xfu) << 0)))
+
+/* ASRI: 1011rrrr000iiiii */
+#define MEOW_ASRI_MASK 0xf0e0
+#define MEOW_ASRI_MATCH 0xb000
+#define MEOW_ASRI_RD_SHIFT 8
+#define MEOW_ASRI_RD_WIDTH 4
+#define MEOW_ASRI_RD(w) (((w) >> 8) & 0xf)
+#define MEOW_ASRI_IMM_SHIFT 0
+#define MEOW_ASRI_IMM_WIDTH 5
+#define MEOW_ASRI_IMM(w) (((w) >> 0) & 0x1f)
+#define MEOW_ENCODE_ASRI(rd, imm) \
+	((uint16_t)(0xb000u \
+	| (((uint32_t)(rd) & 0xfu) << 8) \
+	| (((uint32_t)(imm) & 0x1fu) << 0)))
+
+/* ASRR: 1011rrrr0010ssss */
+#define MEOW_ASRR_MASK 0xf0f0
+#define MEOW_ASRR_MATCH 0xb020
+#define MEOW_ASRR_RD_SHIFT 8
+#define MEOW_ASRR_RD_WIDTH 4
+#define MEOW_ASRR_RD(w) (((w) >> 8) & 0xf)
+#define MEOW_ASRR_RS_SHIFT 0
+#define MEOW_ASRR_RS_WIDTH 4
+#define MEOW_ASRR_RS(w) (((w) >> 0) & 0xf)
+#define MEOW_ENCODE_ASRR(rd, rs) \
+	((uint16_t)(0xb020u \
+	| (((uint32_t)(rd) & 0xfu) << 8) \
+	| (((uint32_t)(rs) & 0xfu) << 0)))
+
+/* ADDSI: 1011dddd1s0iiiii */
+#define MEOW_ADDSI_MASK 0xf0a0
+#define MEOW_ADDSI_MATCH 0xb080
+#define MEOW_ADDSI_RD_SHIFT 8
+#define MEOW_ADDSI_RD_WIDTH 4
+#define MEOW_ADDSI_RD(w) (((w) >> 8) & 0xf)
+#define MEOW_ADDSI_SUB_SHIFT 6
+#define MEOW_ADDSI_SUB_WIDTH 1
+#define MEOW_ADDSI_SUB(w) (((w) >> 6) & 0x1)
+#define MEOW_ADDSI_IMM_SHIFT 0
+#define MEOW_ADDSI_IMM_WIDTH 5
+#define MEOW_ADDSI_IMM(w) (((w) >> 0) & 0x1f)
+#define MEOW_ENCODE_ADDSI(rd, sub, imm) \
+	((uint16_t)(0xb080u \
+	| (((uint32_t)(rd) & 0xfu) << 8) \
+	| (((uint32_t)(sub) & 0x1u) << 6) \
+	| (((uint32_t)(imm) & 0x1fu) << 0)))
+
+/* ADDSR: 1011dddd1s10rrrr */
+#define MEOW_ADDSR_MASK 0xf0b0
+#define MEOW_ADDSR_MATCH 0xb0a0
+#define MEOW_ADDSR_RD_SHIFT 8
+#define MEOW_ADDSR_RD_WIDTH 4
+#define MEOW_ADDSR_RD(w) (((w) >> 8) & 0xf)
+#define MEOW_ADDSR_SUB_SHIFT 6
+#define MEOW_ADDSR_SUB_WIDTH 1
+#define MEOW_ADDSR_SUB(w) (((w) >> 6) & 0x1)
+#define MEOW_ADDSR_RS_SHIFT 0
+#define MEOW_ADDSR_RS_WIDTH 4
+#define MEOW_ADDSR_RS(w) (((w) >> 0) & 0xf)
+#define MEOW_ENCODE_ADDSR(rd, sub, rs) \
+	((uint16_t)(0xb0a0u \
+	| (((uint32_t)(rd) & 0xfu) << 8) \
+	| (((uint32_t)(sub) & 0x1u) << 6) \
 	| (((uint32_t)(rs) & 0xfu) << 0)))
 
 /* BITR: 110nddddoo00ssss */

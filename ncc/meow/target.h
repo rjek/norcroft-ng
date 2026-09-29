@@ -70,6 +70,8 @@
 #undef TARGET_INLINES_CONSTANT_DIVIDE
 /* no indexed addressing: for loops over arrays get stepped pointers */
 #define TARGET_WANTS_STRENGTH_REDUCTION 1
+/* ADDS and SUBS exist: 0 measures the instruction set without them */
+#define TARGET_FLAG_SETTING_ADD 1
 #define TARGET_STACK_MOVES_ONCE         1
 #define DO_NOT_EXPLOIT_REGISTERS_PRESERVED_BY_CALLEE 1
 #define TARGET_LACKS_RR_UNALIGNED_ACCESSES 1

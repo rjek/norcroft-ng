@@ -105,30 +105,33 @@ int disass_meow(unsigned short w, unsigned long addr, char *buf,
         sprintf(buf, "%-8s #%d", "LDI", (int)MEOW_LDI_IMM_S(w));
         return 2;
     case MEOW_ENC_SHI:
-    case MEOW_ENC_SHR: {
-        unsigned arith = MEOW_SHI_ARITH(w);
-        unsigned left = MEOW_SHI_LEFT(w);
-        unsigned rot = MEOW_SHI_ROT(w);
-
-        if (rot != 0) {
-            m = arith != 0 ? NULL : (left != 0 ? "ROL" : "ROR");
-        } else if (left != 0) {
-            m = arith != 0 ? NULL : "LSL";
-        } else {
-            m = arith != 0 ? "ASR" : "LSR";
-        }
-        if (m == NULL) {
-            break;
-        }
-        if (meow_enc_of(w) == MEOW_ENC_SHI) {
-            sprintf(buf, "%-8s %s, #%u", m, regnames[MEOW_SHI_RD(w)],
-                    MEOW_SHI_IMM(w));
-        } else {
-            sprintf(buf, "%-8s %s, %s", m, regnames[MEOW_SHR_RD(w)],
-                    regnames[MEOW_SHR_RS(w)]);
-        }
+        m = MEOW_SHI_ROT(w) != 0 ? (MEOW_SHI_LEFT(w) != 0 ? "ROL" : "ROR")
+                                 : (MEOW_SHI_LEFT(w) != 0 ? "LSL" : "LSR");
+        sprintf(buf, "%-8s %s, #%u", m, regnames[MEOW_SHI_RD(w)],
+                MEOW_SHI_IMM(w));
         return 2;
-    }
+    case MEOW_ENC_SHR:
+        m = MEOW_SHR_ROT(w) != 0 ? (MEOW_SHR_LEFT(w) != 0 ? "ROL" : "ROR")
+                                 : (MEOW_SHR_LEFT(w) != 0 ? "LSL" : "LSR");
+        sprintf(buf, "%-8s %s, %s", m, regnames[MEOW_SHR_RD(w)],
+                regnames[MEOW_SHR_RS(w)]);
+        return 2;
+    case MEOW_ENC_ASRI:
+        sprintf(buf, "%-8s %s, #%u", "ASR", regnames[MEOW_ASRI_RD(w)],
+                MEOW_ASRI_IMM(w));
+        return 2;
+    case MEOW_ENC_ASRR:
+        sprintf(buf, "%-8s %s, %s", "ASR", regnames[MEOW_ASRR_RD(w)],
+                regnames[MEOW_ASRR_RS(w)]);
+        return 2;
+    case MEOW_ENC_ADDSI:
+        sprintf(buf, "%-8s %s, #%u", MEOW_ADDSI_SUB(w) != 0 ? "SUBS" : "ADDS",
+                regnames[MEOW_ADDSI_RD(w)], MEOW_ADDSI_IMM(w));
+        return 2;
+    case MEOW_ENC_ADDSR:
+        sprintf(buf, "%-8s %s, %s", MEOW_ADDSR_SUB(w) != 0 ? "SUBS" : "ADDS",
+                regnames[MEOW_ADDSR_RD(w)], regnames[MEOW_ADDSR_RS(w)]);
+        return 2;
     case MEOW_ENC_BITR:
     case MEOW_ENC_BITI: {
         static const char *const names[2][4] = {

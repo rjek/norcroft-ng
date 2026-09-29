@@ -6196,6 +6196,63 @@ static void sr_rewrite_cmd(SRState *s, Cmd *x)
     }
 }
 
+/* A loop whose variable does nothing but count, for (v = a; v < b; v += c),
+ * counts down instead: v = n; v != 0; v -= 1, which steps and tests in one
+ * instruction.  The bounds are constants, or c is 1 and they are invariant
+ * with a signed v, whose test stays v > 0 to cover b <= a. */
+static void sr_count_down(SRState *s, Expr **initp, Expr **stepp, Expr *test,
+                          Cmd *body, Binder *init_assigns)
+{
+    Expr *rel = sr_strip(test), *init, *lim, *count;
+    TypeExpr *t;
+    int32 a, b, c, n;
+    int inloop;
+    bool consts;
+    AEop op;
+
+    if (rel == NULL || init_assigns != s->v || !sr_refs_ok) return;
+    op = h0_(rel);
+    if (op != s_less && op != s_notequal && op != s_lessequal) return;
+    if (sr_strip(arg1_(rel)) != (Expr *)s->v) return;
+    lim = arg2_(rel);
+    if (!sr_invariant(s, lim) || !integer_constant(s->c)) return;
+    c = result2;
+    if (c <= 0) return;
+    init = *initp;
+    while (h0_(init) == s_invisible || h0_(init) == s_cast || h0_(init) == s_comma)
+        init = h0_(init) == s_cast ? arg1_(init) : arg2_(init);
+    if (h0_(init) != s_assign) return;
+    init = arg2_(init);
+    if (!sr_invariant(s, init)) return;
+    sr_target = s->v; sr_hits = 0;
+    sr_count_expr(*initp); sr_count_expr(test); sr_count_expr(*stepp); sr_count_cmd(body);
+    inloop = sr_hits;
+    sr_target = NULL;
+    if (sr_refs_elsewhere(s->v, inloop, YES) != 0 || inloop != 4) return;
+    t = bindtype_(s->v);
+    consts = integer_constant(init) && (a = result2, integer_constant(lim));
+    if (consts) {
+        b = result2;
+        if (op == s_less) n = b > a ? (b - a + c - 1) / c : 0;
+        else if (op == s_lessequal) n = b >= a ? (b - a) / c + 1 : 0;
+        else if (b >= a && (b - a) % c == 0) n = (b - a) / c;
+        else return;
+        count = mkintconst(t, n, 0);
+        op = s_notequal;
+    } else {
+        if (c != 1 || op != s_less || unsigned_expression_((Expr *)s->v)) return;
+        count = integer_constant(init) && result2 == 0 ? lim :
+                mk_expr2(s_minus, t, lim, init);
+        op = s_greater;
+    }
+    *initp = mk_expr2(s_assign, t, (Expr *)s->v, count);
+    h0_(rel) = op;
+    arg1_(rel) = (Expr *)s->v;
+    arg2_(rel) = mkintconst(t, 0, 0);
+    *stepp = mk_expr2(s_assign, t, (Expr *)s->v,
+                      mk_expr2(s_minus, t, (Expr *)s->v, mkintconst(te_int, 1, 0)));
+}
+
 /* Returns the new binders, having changed *initp, *stepp and the body. */
 static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *body)
 {
@@ -6215,7 +6272,10 @@ static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *bo
     s.in_test = YES;
     sr_rewrite_expr(&s, test);
     s.in_test = NO;
-    if (s.nptrs == 0) return NULL;
+    if (s.nptrs == 0) {
+        sr_count_down(&s, initp, stepp, test, body, init_assigns);
+        return NULL;
+    }
 
     /* If v is named nowhere but this loop, and in the loop only in the
      * test, the test can compare the first pointer with where it ends and
