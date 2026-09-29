@@ -2103,6 +2103,11 @@ static void FinishedOptions(ToolEnv *t) {
           path = setupenv.include_ansi_path;
 #  endif
 #endif
+#ifndef TARGET_IS_RISC_OS
+      /* The compiled-in headers are searched after the -I directories  */
+      /* (as a Unix compiler's own headers are), before the system's.   */
+      AddInclude(t, "-I.", "-");
+#endif
       AddInclude(t, "-I.", path);
 #ifdef DRIVER_EXTRA_INCLUDES
       /* Further system directories, searched after 'path'.             */

@@ -5344,7 +5344,11 @@ static Expr *mkcond_1(Expr *a, Expr *b, Expr *c)
 /* int x[(1 ? 2:(0,1))] to int x[2], which silently misses a constraint */
 /* violation that the comma operator shall not appear in const exprs.   */
 /* Similarly x[1 ? 2 : f()].  AM thinks the ANSI draft is a mess here.  */
-    return mkinvisible(t, r, intval_(a) ? b : c);
+    r = mkinvisible(t, r, intval_(a) ? b : c);
+    /* (As mkinvisible() does an s_integer, leave a 64-bit constant      */
+    /* bare, so that it can be reduced further, e.g. in #if.)            */
+    return h0_(r) == s_invisible && h0_(arg2_(r)) == s_int64con ?
+               arg2_(r) : r;
 }
 
 void sem_init(void)

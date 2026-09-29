@@ -257,7 +257,9 @@ static bool c99_dynamic_init(Expr *e)
         return NO;
     lhs = mk_exprwdot(s_dot, inittype, (Expr *)c99_dyninit_obj,
                       get_datadesc_size() - bindaddr_(c99_dyninit_image));
-    e = mkbinary(s_init, lhs, e);
+    /* e was converted to inittype when read, but optimise0() may have   */
+    /* dropped the cast (e.g. of &array to a pointer to its element).    */
+    e = mkbinary(s_init, lhs, mkcast(s_cast, e, inittype));
     c99_dyninits = c99_dyninits ? mkbinary(s_comma, c99_dyninits, e) : e;
     return YES;
 }
@@ -1141,6 +1143,8 @@ case bitofstg_(s_auto):                 /* includes register vars too   */
                 Binder *sb = mk_binder(gensymval(0), bitofstg_(s_static),
                                        bindtype_(b));
                 DataInit *start;
+                Binder *outer_obj, *outer_image;
+                Expr *outer_dyninits;
                 /* It suffices to allocate sb like any other local static. */
 #ifdef TARGET_IS_HELIOS
 /*
@@ -1166,10 +1170,15 @@ case bitofstg_(s_auto):                 /* includes register vars too   */
                 /*
                  * Create hidden static for auto initialiser.
                  */
+                /* (A compound literal in the initialiser comes here     */
+                /* too, while it is read, so the state is saved.)        */
+                outer_obj = c99_dyninit_obj, outer_image = c99_dyninit_image;
+                outer_dyninits = c99_dyninits;
+                c99_dyninits = NULL;
                 if (CStd(STD_C99))
                     c99_dyninit_obj = b, c99_dyninit_image = sb;
                 initstaticvar(sb, NO);
-                c99_dyninit_obj = NULL;
+                c99_dyninit_obj = outer_obj, c99_dyninit_image = outer_image;
                 cur_initlhs = 0;
 /* Update bindtype_(b) in case it was typedef to open array which       */
 /* would have been copied (cloned) by initstaticvar().                  */
@@ -1210,9 +1219,8 @@ case bitofstg_(s_auto):                 /* includes register vars too   */
                         dyninit = mkbinary(s_comma, dyninit, e);
                 }
                 if (c99_dyninits != NULL)
-                {   dyninit = mkbinary(s_comma, dyninit, c99_dyninits);
-                    c99_dyninits = NULL;
-                }
+                    dyninit = mkbinary(s_comma, dyninit, c99_dyninits);
+                c99_dyninits = outer_dyninits;
                 SetDataArea(DS_ReadWrite);
             }
             else

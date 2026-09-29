@@ -908,6 +908,7 @@ static Expr *rd_idexpr(int labelhack)
 /* rd_primary is called with rd_name having been called     */
 /* on curlex.sym.  (In rd_prefixexp() if not earlier.)                  */
 static Expr *rd_compoundlit(TypeExpr *t, bool isstatic);
+static bool hashif_is_64bit(void);
 
 static Expr *rd_primaryexp(int labelhack)
 {
@@ -1160,6 +1161,12 @@ case s_integer:            /* invent some more te_xxx for the next line? */
         a = mkintconst((curlex.a2.flag == bitoftype_(s_int) ? te_int :
                                           primtype_(curlex.a2.flag)),
                        curlex.a1.i, 0);
+        /* #if's arithmetic is in intmax_t or uintmax_t from C99 (and in  */
+        /* long, which may be as wide, before).                          */
+        if (pp_inhashif && hashif_is_64bit())
+            a = mkcast(s_cast, a, (typespecmap_(type_(a)) &
+                                   bitoftype_(s_unsigned)) ? te_ullint :
+                                                             te_llint);
         nextsym();
         break;
     }
@@ -1500,6 +1507,11 @@ Expr *rd_expr(int n)
 
 /* The next routine is used by the preprocessor to parse #if and #elif. */
 /* It relies on the caller (pp) to set pp_inhashif (see cfe/pp.h).      */
+/* Whether #if's arithmetic is 64-bit (see rd_primaryexp()).           */
+static bool hashif_is_64bit(void)
+{   return CStd(STD_C99) || (!LanguageIsCPlusPlus && sizeof_long == 8);
+}
+
 bool syn_hashif()
 {    /* note that we read the largest possible expression (rather
         that the ANSI "constant expression" syntax which excludes
@@ -1514,6 +1526,8 @@ bool syn_hashif()
      {   cc_err(curlex.sym == s_eof ? syn_err_hashif_eof : syn_err_hashif_junk);
          while (curlex.sym != s_eof && curlex.sym != s_eol) nextsym();
      }
+     if (e != 0 && h0_(e) == s_int64con)     /* (see hashif_is_64bit()) */
+         return (int64val_(e).u.lo | int64val_(e).u.hi) != 0;
      if (e == 0 || h0_(e) != s_integer)
      {   if (e != 0) moan_nonconst(e, syn_moan_hashif_nonconst,
                                    syn_moan_hashif_nonconst1,
