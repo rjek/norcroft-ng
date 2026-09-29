@@ -407,6 +407,7 @@ static void multiply_integer(RealRegister rd, RealRegister rs, int32 k)
 
 #define LABREF_B    0x01000000  /* 9-bit halfword offset in a B */
 #define LABREF_LDI  0x02000000  /* LDI whose value is dest + imm - (q+2) */
+#define LABREF_FAR  0x03000000  /* LDI hi; LSL ir, #8; ADD ir, #lo; ADD pc, ir at q */
 
 static void setlabel2(LabelNumber *ll, int32 pos)
 {
@@ -440,17 +441,35 @@ static void setlabel1(LabelNumber *l)
             if (d < -2048 || d > 2047) syserr(syserr_displacement, (long)d);
             code_hword_(q) = (unsigned16)MEOW_ENCODE_LDI((uint32_t)d);
             break;
+        case LABREF_FAR:
+            d = codep - (q + 6);
+            if ((d >> 8) < -2048 || (d >> 8) > 2047) syserr(syserr_displacement, (long)d);
+            code_hword_(q) = (unsigned16)MEOW_ENCODE_LDI((uint32_t)(d >> 8));
+            code_hword_(q + 4) = (unsigned16)MEOW_ENCODE_ADD8(R_IR, d & 0xff);
+            break;
         }
         p = (List *)discard2(p);
     }
     setlabel2(l, codep);
 }
 
+/* An island's size: a short branch gets a four-byte slot, one already in
+ * a slot an eight-byte far jump. */
+static int32 island_size(void)
+{
+    FRef *f;
+    int32 size = 0;
+
+    for (f = frefs; f != NULL; f = cdr_(f))
+        size += f->reach == B_REACH ? 4 : 8;
+    return size;
+}
+
 static void recalc_mustbranchby(void)
 {
     FRef *f;
     int32 by = 0x10000000;
-    int32 island = 4 * nfrefs + 8;
+    int32 island = island_size() + 8;
 
     for (f = frefs; f != NULL; f = cdr_(f))
         if (f->codep + f->reach - island < by)
@@ -563,10 +582,16 @@ static void dumplits(bool needs_jump);
 
 /* Plant an island: every pending short reference is pointed at a long
  * jump here, which in turn becomes the pending reference. */
+/* Rescue every pending branch.  A short one gets a slot here reaching
+ * 2 KB, as short as possible because a whole case table's entries may
+ * need slots within a B's reach; it stays pending.  One already in a
+ * slot gets a jump reaching ±512 KB, patched when its real destination
+ * is set, and is pending no longer.  So a branch costs at most two
+ * slots however many islands it passes, rather than one at each. */
 static void dump_island(void)
 {
-    FRef *f;
-    int32 size = 4 * nfrefs;
+    FRef *f, *keep = NULL, *next;
+    int32 size = island_size();
     LabelNumber *skip;
 
     if (nfrefs == 0) return;
@@ -580,15 +605,28 @@ static void dump_island(void)
         out_ldi(size + 2);
         out_add3(NO, R_PC, R_IR, 0);
     }
-    for (f = frefs; f != NULL; f = cdr_(f)) {
+    for (f = frefs; f != NULL; f = next) {
+        next = cdr_(f);
         setlabel1(f->chained);
-        f->chained = nextlabel();
-        f->codep = codep;
-        f->reach = LDI_REACH;
-        addfref_(f->chained, codep | LABREF_LDI);
-        out_ldi(0);
-        out_add3(NO, R_PC, R_IR, 0);
+        if (f->reach == B_REACH) {
+            f->chained = nextlabel();
+            f->codep = codep;
+            f->reach = LDI_REACH;
+            addfref_(f->chained, codep | LABREF_LDI);
+            out_ldi(0);
+            out_add3(NO, R_PC, R_IR, 0);
+            cdr_(f) = keep;
+            keep = f;
+        } else {
+            addfref_(f->real_dest, codep | LABREF_FAR);
+            out_ldi(0);
+            out_shift(R_IR, NO, YES, NO, 8);
+            out_add8(NO, R_IR, 0);
+            out_add3(NO, R_PC, R_IR, 0);
+            nfrefs--;
+        }
     }
+    frefs = keep;
     setlabel2(skip, codep);
     recalc_mustbranchby();
 }
@@ -626,7 +664,7 @@ static void addressability(int32 n)
 {
     int32 litpoolsize = 4 * litpoolp;
 
-    if (litpoolsize + 4 * nfrefs + 16 >= n) dumplits(YES);
+    if (litpoolsize + island_size() + 16 >= n) dumplits(YES);
     if (codep - litpoolsize + n < mustlitby) mustlitby = codep - litpoolsize + n;
 }
 
