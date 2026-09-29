@@ -103,7 +103,7 @@ static void disass_cb(meow_dis_type type, long offset, unsigned long target,
 static void decode_DC(int32 w)
 {   int32 col = fprintf(asmstream, "DCD");
     col = asm_padcol9(col);
-    fprintf(asmstream, "0x%.8lx", (long)w);
+    fprintf(asmstream, "0x%.8lx", (unsigned long)(unsigned32)w);
 }
 
 static void decode_DCA(Symstr *s, int32 w)

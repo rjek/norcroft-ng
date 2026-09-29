@@ -2380,30 +2380,30 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
         case s_times: status = flt_multiply(&r,&d,&e); break;
         case s_div:   status = flt_divide(&r,&d,&e); break;
         case s_power: return c;
-#define SEM_FLTCMP(op) mkintconst(type_(c),flt_compare(&d,&e) op 0,c);
-        case s_equalequal:   return SEM_FLTCMP(==);
-        case s_notequal:     return SEM_FLTCMP(!=);
-        case s_less:         return SEM_FLTCMP(<);
-        case s_lessequal:    return SEM_FLTCMP(<=);
-        case s_greater:      return SEM_FLTCMP(>);
-        case s_greaterequal: return SEM_FLTCMP(>=);
+/* A NaN is unordered: only != holds against one.                       */
+#define SEM_FLTCMP(op, unordered) \
+        { int cmp = flt_compare(&d,&e); \
+          return mkintconst(type_(c), \
+                   (cmp < -1 || cmp > 1) ? (unordered) : cmp op 0, c); }
+        case s_equalequal:   SEM_FLTCMP(==, 0);
+        case s_notequal:     SEM_FLTCMP(!=, 1);
+        case s_less:         SEM_FLTCMP(<, 0);
+        case s_lessequal:    SEM_FLTCMP(<=, 0);
+        case s_greater:      SEM_FLTCMP(>, 0);
+        case s_greaterequal: SEM_FLTCMP(>=, 0);
 #undef SEM_FLTCMP
         default: syserr(syserr_trydiadicreduce2, (long)op);
                  return c;
     }
-    if (status > flt_ok) {
-        if (status == flt_very_small)
-            flt_report_error(status);
-        else {
-            if (errorexpr == NULL)
-            {   errormsg = sem_errwarn_fp_overflow;
-                errorexpr = c;
-            }
-            /* improve */
-            return MarkError(mk_expr2(op, type_(c), a, b),
-                             errorexpr, errormsg);
+    /* The result is folded whatever happened, as IEEE arithmetic would
+     * produce it at run time; overflow and NaNs just get a warning.     */
+    if (status == flt_very_big) {
+        if (errorexpr == NULL)
+        {   errormsg = sem_errwarn_fp_overflow;
+            errorexpr = c;
         }
-    }
+    } else if (status > flt_ok)
+        flt_report_error(status);
     /* Safety, I presume (possibly can remove things like volatile?):   */
     flag &= bitoftype_(s_double)|bitoftype_(s_short)|bitoftype_(s_long);
     {   FloatCon *m = fltrep_from_widest(&r, flag, 0);
@@ -2589,14 +2589,7 @@ static Expr *trymonadreduce(AEop op, Expr *a, Expr *c, SET_BITMAP flag)
         default: syserr(syserr_trymonadicreduce1, (long)op);
                  return c;
     }
-    if (status > flt_ok)
-    { if (errorexpr == NULL)
-      { errormsg = sem_errwarn_fp_overflow;
-        errorexpr = c;
-      }
-      return MarkError(mk_expr1(op, type_(c), a),
-                       errorexpr, errormsg);
-    }
+    if (status > flt_ok) flt_report_error(status);
     {   FloatCon *m = fltrep_from_widest(&r, flag, 0);
         return MarkError(mkinvisible(type_(c), c, (Expr *)m),
                          errorexpr, errormsg);
@@ -2767,6 +2760,9 @@ case s_typespec:
             /* remember (double)(-1u) != (double)(-1) ... */
 /* Use int_to_real() rather than flt_itod() or flt_utod() since it fills */
 /* in a string with the number etc etc etc.                              */
+            if (h0_(a) == s_int64con)
+                return mkinvisible(tc, c, (Expr *)int64_to_real(
+                    &int64val_(a).i, ta & bitoftype_(s_unsigned), m));
             if (ta & ARITHTYPEBITS)
                 return mkinvisible(tc, c, (Expr *)int_to_real(
                     n, ta & bitoftype_(s_unsigned), m));
@@ -2806,6 +2802,13 @@ omit_check:
                     ? (n | ~(int32)0xff) : (n & 0xff);
                 break;
             case bitoftype_(s_int):
+                if (int_islonglong_(m)) {
+                    int64 v;
+                    status = (m & bitoftype_(s_unsigned)) ? flt_dtoull((uint64 *)&v, &d)
+                                                          : flt_dtoll(&v, &d);
+                    if (status > flt_ok) cc_warn(sem_warn_fix_fail);
+                    return (Expr *)mkint64const(m, &v);
+                }
                 status = (m & bitoftype_(s_unsigned)) ? flt_dtou((unsigned32 *)&n, &d)
                                                       : flt_dtoi(&n, &d);
                 if ((int_isshort_(m) ? sizeof_short :
@@ -2826,10 +2829,8 @@ omit_check:
                 /* already been given.  Could do ok=1, n=0 instead.       */
                 return c;
         }
-        if (status > flt_ok)
-        {   cc_warn(sem_warn_fix_fail);
-            n = 0;
-        }
+        /* n saturates, or is zero for a NaN, as the run-time code does */
+        if (status > flt_ok) cc_warn(sem_warn_fix_fail);
         return mkintconst(tc,n,c);
     }
     return c;   /* nothing doing */

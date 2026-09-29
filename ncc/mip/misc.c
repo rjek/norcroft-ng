@@ -167,7 +167,9 @@ FloatCon *real_of_string(const char *s, int32 flag)
         if (sizeof_double == 4 ||
             sizeof_float < sizeof_double  &&  (flag & bitoftype_(s_short)))
             /* so we only need to narrow once  */
-            fltrep_narrow_round(&x->floatbin.db, &x->floatbin.fb);
+        {   failed = fltrep_narrow_round(&x->floatbin.db, &x->floatbin.fb);
+            if (failed > flt_ok) flt_report_error(failed);
+        }
     }
     return x;
 }
@@ -217,6 +219,14 @@ FloatCon *int_to_real(int32 n, int32 u, SET_BITMAP m)
     /* code alone - it works quite well enough.                          */
     if (u) _sprintf(s, "%u.0", (uint32)n);
     else _sprintf(s, "%d.0", (int32)n);
+    return real_of_string(s,m);
+}
+
+FloatCon *int64_to_real(int64 const *n, int32 u, SET_BITMAP m)
+{   char s[32];
+    unsigned long long v = ((unsigned long long)(uint32)n->hi << 32) | n->lo;
+    if (u) _sprintf(s, "%llu.0", v);
+    else _sprintf(s, "%lld.0", (long long)v);
     return real_of_string(s,m);
 }
 
@@ -1485,13 +1495,16 @@ void cc_err(msg_t errorcode, ...)
     va_end(a);
 }
 
+/* The IEEE result (an infinity, a NaN, zero) is kept in every case, so
+ * these are all warnings. */
 void flt_report_error(int failure) {
     switch (failure) {
-    default:               syserr("flt_report_error");
     case flt_very_small:   cc_warn(fp_rerr_very_small); break;
-    case flt_very_big:     cc_rerr(fp_err_very_big); break;
-    case flt_big_single:   cc_rerr(fp_err_big_single); break;
+    case flt_very_big:     cc_warn(fp_err_very_big); break;
+    case flt_big_single:   cc_warn(fp_err_big_single); break;
     case flt_small_single: cc_warn(fp_rerr_small_single); break;
+    case flt_invalidop:    cc_warn(fp_warn_nan); break;
+    default:               break;
     }
 }
 

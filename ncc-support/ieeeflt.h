@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include "host.h"
+#include "int64.h"
 
 typedef union {
     uint32_t    val;
@@ -88,6 +89,11 @@ extern int flt_dtou(uint32_t *res, const DbleBin *a1);
 
 extern int flt_itod(DbleBin *res, int32_t n);
 extern int flt_utod(DbleBin *res, uint32_t n);
+
+extern int flt_dtoll(int64 *res, const DbleBin *a1);
+extern int flt_dtoull(uint64 *res, const DbleBin *a1);
+extern int flt_lltod(DbleBin *res, const int64 *n);
+extern int flt_ulltod(DbleBin *res, const uint64 *n);
 
 extern int flt_move(DbleBin *res, const DbleBin *a1);
 

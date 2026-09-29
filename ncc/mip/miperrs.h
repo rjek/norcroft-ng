@@ -340,6 +340,7 @@ extern void pop_nested_context(void);
 
 #define cg_rerr_iffy_arithmetics "iffy arithmetic shift"
 #define fp_rerr_very_small "small floating point value converted to 0.0"
+#define fp_warn_nan "floating point constant is not a number"
 #define fp_rerr_small_single \
         "small (single precision) floating value converted to 0.0"
 #define sem_rerr_sizeof_bitfield \

@@ -25,6 +25,7 @@
 
 #include "host.h"
 #include "ieeeflt.h"
+#include "int64.h"
 
 static double dblebin_get_double(const DbleBin *db)
 {
@@ -107,9 +108,7 @@ int flt_divide(DbleBin *res, const DbleBin *a1, const DbleBin *a2)
     double x = dblebin_get_double(a1);
     double y = dblebin_get_double(a2);
 
-    if (y == 0.0)
-        return flt_invalidop;
-
+    /* division by zero gives an infinity or a NaN, as IEEE says */
     dblebin_set_double(res, x / y);
     return status(res);
 }
@@ -180,19 +179,16 @@ int flt_compare(const DbleBin *a1, const DbleBin *a2)
 }
 
 // conversions
+/* Conversions to integers truncate towards zero.  C leaves a value that
+ * does not fit undefined; here it saturates and a NaN gives zero, which
+ * is what the MEOW runtime does, and the status says so. */
 int flt_dtoi(int32_t *res, const DbleBin *a1)
 {
     double x = dblebin_get_double(a1);
-    DbleBin tmp;
 
-    dblebin_set_double(&tmp, x);
-    if (!my_isfinite(&tmp))
-        return flt_invalidop;
-
-    if (x < (double)INT32_MIN || x > (double)INT32_MAX) {
-        *res = (int32_t)x;    /* truncating like C */
-        return flt_inexact;
-    }
+    if (my_isnan(a1)) { *res = 0; return flt_invalidop; }
+    if (x >= 2147483648.0) { *res = INT32_MAX; return flt_inexact; }
+    if (x < -2147483648.0) { *res = INT32_MIN; return flt_inexact; }
     *res = (int32_t)x;
     return flt_ok;
 }
@@ -201,15 +197,41 @@ int flt_dtou(uint32_t *res, const DbleBin *a1)
 {
     double x = dblebin_get_double(a1);
 
-    if (!my_isfinite(a1) || x < 0.0)
-        return flt_invalidop;
-
-    if (x > (double)UINT32_MAX) {
-        *res = (uint32_t)x;   /* trunc */
-        return flt_inexact;
-    }
+    if (my_isnan(a1)) { *res = 0; return flt_invalidop; }
+    if (x >= 4294967296.0) { *res = UINT32_MAX; return flt_inexact; }
+    if (x <= -1.0) { *res = 0; return flt_inexact; }
     *res = (uint32_t)x;
     return flt_ok;
+}
+
+int flt_dtoll(int64 *res, const DbleBin *a1)
+{
+    double x = dblebin_get_double(a1);
+    long long v;
+    int status = flt_ok;
+
+    if (my_isnan(a1)) { v = 0; status = flt_invalidop; }
+    else if (x >= 9223372036854775808.0) { v = LLONG_MAX; status = flt_inexact; }
+    else if (x < -9223372036854775808.0) { v = LLONG_MIN; status = flt_inexact; }
+    else v = (long long)x;
+    res->lo = (uint32)(unsigned long long)v;
+    res->hi = (int32)((unsigned long long)v >> 32);
+    return status;
+}
+
+int flt_dtoull(uint64 *res, const DbleBin *a1)
+{
+    double x = dblebin_get_double(a1);
+    unsigned long long v;
+    int status = flt_ok;
+
+    if (my_isnan(a1)) { v = 0; status = flt_invalidop; }
+    else if (x >= 18446744073709551616.0) { v = ULLONG_MAX; status = flt_inexact; }
+    else if (x <= -1.0) { v = 0; status = flt_inexact; }
+    else v = (unsigned long long)x;
+    res->lo = (uint32)v;
+    res->hi = (uint32)(v >> 32);
+    return status;
 }
 
 int flt_itod(DbleBin *res, int32_t n)
@@ -224,6 +246,20 @@ int flt_utod(DbleBin *res, uint32_t n)
     return flt_ok;
 }
 
+int flt_lltod(DbleBin *res, const int64 *n)
+{
+    long long v = (long long)(((unsigned long long)(uint32)n->hi << 32) | n->lo);
+    dblebin_set_double(res, (double)v);
+    return flt_ok;
+}
+
+int flt_ulltod(DbleBin *res, const uint64 *n)
+{
+    unsigned long long v = ((unsigned long long)n->hi << 32) | n->lo;
+    dblebin_set_double(res, (double)v);
+    return flt_ok;
+}
+
 int flt_move(DbleBin *res, const DbleBin *a1) {
     *res = *a1;
     return flt_ok;
@@ -234,20 +270,20 @@ void fltrep_widen(const FloatBin *a, DbleBin *res)
     dblebin_set_double(res, (double)a->f);
 }
 
+/* Narrowing rounds to nearest; the status only remarks on a finite value
+ * that became an infinity or a nonzero value that became zero.  A
+ * denormal result is a value like any other. */
 int fltrep_narrow(const DbleBin *a, FloatBin *res)
 {
     double x = dblebin_get_double(a);
     res->f = (float)x;
 
+    if (!my_isfinite(a))
+        return flt_ok;
     if (!my_fisfinite(res))
-        return flt_very_big;
-
-    if (x > (double)FLT_MAX)
         return flt_big_single;
-
-    if (x != 0.0 && fabs(x) < (double)FLT_MIN)
+    if (x != 0.0 && res->f == 0.0f)
         return flt_small_single;
-
     return flt_ok;
 }
 
@@ -268,21 +304,17 @@ int fltrep_stod(const char *s, DbleBin *out, void *ignored)
     endp = NULL;
     x = strtod(s, &endp);
 
-    if (endp == s)
+    if (endp == s) {
+        dblebin_set_double(out, 0.0);
         return flt_bad;
-
-    if (x == HUGE_VAL)
-        return flt_very_big;
-
-    if (x == -HUGE_VAL)
-        return flt_very_small;
-
-    if (errno == ERANGE) {
-        return flt_very_small;  // underflow
     }
-
+    /* the value is kept whatever happened: an infinity for overflow, a
+     * denormal or zero for underflow */
     dblebin_set_double(out, x);
-
+    if (x == HUGE_VAL || x == -HUGE_VAL)
+        return flt_very_big;
+    if (errno == ERANGE && x == 0.0)
+        return flt_very_small;
     return flt_ok;
 }
 
