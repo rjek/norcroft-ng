@@ -1031,6 +1031,10 @@ static void dbg_scope1(BindListList *newbl, BindListList *old)
 
 static BlockHead *prevblock;
 
+/* The instruction after the one being shown, for a backend that fuses
+ * neighbours; NULL at the end of a block or outside one. */
+Icode const *cg_next_icode;
+
 static void show_basic_block(BlockHead *p, uint32 cond)
 {
     Icode *b = blkcode_(p);
@@ -1074,7 +1078,9 @@ static void show_basic_block(BlockHead *p, uint32 cond)
                         ic.op = (ic.op & ~(Q_MASK & ~Q_UBIT)) | cond;
                 }
         }
+        cg_next_icode = b1 + 1 < len ? &b[b1 + 1] : NULL;
         expand_jop_macro(&ic);
+        cg_next_icode = NULL;
     }
     prevblock = p;
 }

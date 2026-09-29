@@ -349,34 +349,45 @@ static void bit_integer(int op, RealRegister rd, RealRegister rs, int32 k)
 }
 
 /* rd = rs * k by shifts and adds. */
+/* rd = rs * k by Horner's scheme over the signed digits of k: shift the
+ * running product up to the next nonzero digit, then add or subtract rs.
+ * A run of ones costs one subtraction instead of one add per bit. */
 static void multiply_integer(RealRegister rd, RealRegister rs, int32 k)
 {
     uint32_t v = (uint32_t)(k < 0 ? -k : k);
-    int i;
-    bool first = YES;
+    int digit[34];
+    int n = 0, i, top, gap;
+    RealRegister src = rs;
 
     if (k == 0) {
         load_integer(rd, 0);
         return;
     }
-    if (bit_index(v) >= 0) {
-        out_mov(rd, rs);
-        if (bit_index(v) > 0) out_shift(rd, NO, YES, NO, bit_index(v));
-    } else {
-        out_mov(R_IP, rs);
-        for (i = 0; i < 32; i++) {
-            if ((v & ((uint32_t)1 << i)) == 0) continue;
-            if (first) {
-                out_mov(rd, R_IP);
-                if (i > 0) out_shift(rd, NO, YES, NO, i);
-                first = NO;
-            } else {
-                out_mov(R_IR, R_IP);
-                out_shift(R_IR, NO, YES, NO, i);
-                out_add3(NO, rd, R_IR, 0);
-            }
+    while (v != 0) {
+        if ((v & 1) != 0) {
+            digit[n] = (v & 3) == 1 ? 1 : -1;
+            v -= (uint32_t)digit[n];
+        } else {
+            digit[n] = 0;
         }
+        v >>= 1;
+        n++;
     }
+    top = n - 1;                        /* always a +1 */
+    if (rd == rs) {
+        out_mov(R_IP, rs);
+        src = R_IP;
+    }
+    out_mov(rd, src);
+    gap = 0;
+    for (i = top - 1; i >= 0; i--) {
+        gap++;
+        if (digit[i] == 0) continue;
+        out_shift(rd, NO, YES, NO, gap);
+        gap = 0;
+        out_add3(digit[i] < 0, rd, src, 0);
+    }
+    if (gap > 0) out_shift(rd, NO, YES, NO, gap);
     if (k < 0) {
         out_bitr(rd, 0, NO, rd);
         out_add8(NO, rd, 1);
@@ -676,7 +687,13 @@ static void call_k(Symstr *name)
 
     if (d >= 0) {
         int32 delta = d - (codebase + codep + 4);
+        int32 bdelta = d - (codebase + codep + 2);
 
+        if (bdelta >= -512 && bdelta <= 510) {
+            out_add3(NO, R_LR, R_PC, 4);    /* ADD lr, pc, #4; B target */
+            out_b(C_AL, bdelta / 2);
+            return;
+        }
         if (delta >= -2048 && delta <= 2047) {
             out_ldi(delta);
             out_add3(NO, R_LR, R_PC, 4);
@@ -775,6 +792,10 @@ static void routine_exit(void)
     add_integer(R_SP, R_SP, fp_minus_sp);
     for (r = R_V1; r < R_V1 + NVARREGS; r++)
         if (save_mask & regbit(r)) out_pop(r);
+    if (lr_pushed && pushed_args == 0) {
+        out_pop(R_PC);                  /* the return address goes straight to pc */
+        return;
+    }
     if (lr_pushed) out_pop(R_LR);
     if (pushed_args != 0) add_integer(R_SP, R_SP, 4 * pushed_args);
     out_mov(R_PC, R_LR);
@@ -795,19 +816,31 @@ static void sign_extend(RealRegister r, int bits)
     out_shift(r, YES, NO, NO, 32 - bits);
 }
 
-static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
+static int mem_size(J_OPCODE op)
+{
+    switch (j_memsize(op & J_TABLE_BITS)) {
+    case MEM_B: return 1;
+    case MEM_W: return 2;
+    default:    return 4;
+    }
+}
+
+static bool mem_packed(J_OPCODE op)
+{
+    return mem_size(op) > 1 && (op & J_ALIGNMENT) == J_ALIGN1 &&
+           (op & J_BASEALIGN4) == 0;
+}
+
+/* wb: 0 plain, 1 [rb, #-size]!, 2 [rb], #-size, 3 [rb], #size */
+static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off,
+                   int wb)
 {
     bool store = writes_mem(op & J_TABLE_BITS) != 0;
-    int size;
+    int size = mem_size(op);
     RealRegister ra;
 
-    switch (j_memsize(op & J_TABLE_BITS)) {
-    case MEM_B: size = 1; break;
-    case MEM_W: size = 2; break;
-    default:    size = 4; break;
-    }
     ra = address_of(rb, off);
-    if (size > 1 && (op & J_ALIGNMENT) == J_ALIGN1 && (op & J_BASEALIGN4) == 0) {
+    if (mem_packed(op)) {
         /* packed data: a byte at a time, walking up with post-increment */
         int i;
 
@@ -831,11 +864,63 @@ static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
         }
         return;
     }
-    out_mem(store, rv, ra, size, NO, 0);
+    out_mem(store, rv, ra, size, NO, wb);
     if (!store && (op & J_SIGNED)) {
         if (size == 1) sign_extend(rv, 8);
         else if (size == 2) sign_extend(rv, 16);
     }
+}
+
+static bool is_ldrk_strk(J_OPCODE op)
+{
+    switch (op & J_TABLE_BITS) {
+    case J_LDRK: case J_LDRBK: case J_LDRWK:
+    case J_STRK: case J_STRBK: case J_STRWK:
+        return YES;
+    default:
+        return NO;
+    }
+}
+
+/* A plain access through rb followed by rb += size (or -= size) is one
+ * post-indexed access.  The second instruction is then skipped. */
+static bool skip_next;
+
+static bool fuse_post(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
+{
+    Icode const *n = cg_next_icode;
+    int size = mem_size(op);
+    bool store = writes_mem(op & J_TABLE_BITS) != 0;
+
+    if (n == NULL || off != 0 || mem_packed(op)) return NO;
+    /* the block's own copy still names virtual registers */
+    if ((n->op & J_TABLE_BITS) != J_ADDK || register_number(n->r1.r) != rb ||
+        register_number(n->r2.r) != rb)
+        return NO;
+    if (n->r3.i != size && n->r3.i != -size) return NO;
+    if (!store && rv == rb) return NO;
+    mem_op(op, rv, rb, 0, n->r3.i == size ? 3 : 2);
+    skip_next = YES;
+    return YES;
+}
+
+/* rb -= size followed by an access through rb is one pre-decremented
+ * access. */
+static bool fuse_pre(RealRegister rd, RealRegister rs, int32 k)
+{
+    Icode const *n = cg_next_icode;
+
+    RealRegister rv;
+
+    if (n == NULL || rd != rs || k >= 0) return NO;
+    if (!is_ldrk_strk(n->op) || mem_packed(n->op)) return NO;
+    if (register_number(n->r2.r) != rd || n->r3.i != 0 || -k != mem_size(n->op))
+        return NO;
+    rv = register_number(n->r1.r);
+    if (writes_mem(n->op & J_TABLE_BITS) == 0 && rv == rd) return NO;
+    mem_op(n->op & ~J_DEADBITS, rv, rd, 0, 1);
+    skip_next = YES;
+    return YES;
 }
 
 /* ---- block copy and clear ---------------------------------------------- */
@@ -1027,6 +1112,10 @@ void show_instruction(const Icode *const ic)
     RealRegister mr = ic->r3.rr;
     int32 q = op & Q_MASK;
 
+    if (skip_next) {
+        skip_next = NO;
+        return;                         /* already done by the previous one */
+    }
     if (op1 != J_BXX) {
         in_table = NO;
         case_reg = NoRegister;
@@ -1084,6 +1173,7 @@ case J_NOTR:
         out_bitr(r1, 0, NO, mr);
         break;
 case J_ADDK:
+        if (fuse_pre(r1, r2, mi)) break;
         add_integer(r1, r2, mi);
         break;
 case J_SUBK:
@@ -1133,15 +1223,28 @@ case J_CMPR:
         break;
 case J_LDRK: case J_LDRBK: case J_LDRWK:
 case J_STRK: case J_STRBK: case J_STRWK:
-        mem_op(op, r1, r2, mi);
+        if (fuse_post(op, r1, r2, mi)) break;
+        mem_op(op, r1, r2, mi, 0);
         break;
 case J_LDRR: case J_LDRBR: case J_LDRWR:
 case J_STRR: case J_STRBR: case J_STRWR:
-        /* base + index: compute into at */
+        /* base + index: into whichever of them dies here, else into at */
         if (mr == R_IP || r2 == R_IP) syserr(syserr_meow_reg, (long)mr, "index");
-        out_mov(R_IP, r2);
-        out_add3(NO, R_IP, mr, 0);
-        mem_op(op, r1, R_IP, 0);
+        {   bool store = writes_mem(op1) != 0;
+            RealRegister ra = R_IP;
+
+            if ((ic->op & J_DEAD_R3) && !(store && r1 == mr)) {
+                out_add3(NO, mr, r2, 0);
+                ra = mr;
+            } else if ((ic->op & J_DEAD_R2) && !(store && r1 == r2)) {
+                out_add3(NO, r2, mr, 0);
+                ra = r2;
+            } else {
+                out_mov(R_IP, r2);
+                out_add3(NO, R_IP, mr, 0);
+            }
+            mem_op(op, r1, ra, 0, 0);
+        }
         break;
 case J_CALLK:
         call_k((Symstr *)m);

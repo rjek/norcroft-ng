@@ -87,13 +87,28 @@ static Symstr *decode_external(int32 p)
 
 static int32 destination_label;
 
+/* A branch with no label is a short call to a function already emitted:
+ * name it from the symbol table. */
+static Symstr *function_at(unsigned long target)
+{
+    ExtRef *x;
+    for (x = obj_symlist; x != NULL; x = x->extcdr)
+        if ((x->extflags & (xr_defloc | xr_defext)) && (x->extflags & xr_code) &&
+            !(x->extflags & xr_dataincode) && (unsigned long)x->extoffset == target)
+            return x->extsym;
+    return NULL;
+}
+
 static void disass_cb(meow_dis_type type, long offset, unsigned long target,
                       void *cb_arg, char *buf)
 {
-    IGNORE(type); IGNORE(offset); IGNORE(target); IGNORE(cb_arg);
+    Symstr *fn;
+    IGNORE(type); IGNORE(offset); IGNORE(cb_arg);
     if (destination_label != -1)
         sprintf(buf, "F%ldL%ld", (long)current_procnum,
                 (long)destination_label & 0xfffff);
+    else if ((fn = function_at(target)) != NULL)
+        spr_asmname(buf, symname_(fn));
     else {
         asm_error = YES;
         sprintf(buf, "?");

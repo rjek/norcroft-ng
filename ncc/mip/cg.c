@@ -4035,7 +4035,7 @@ static VRegnum cg_binary_or_fn(J_OPCODE op, TypeExpr *type,
         a1 = a2;
         a2 = t;
     }
-#if defined TARGET_HAS_MULTIPLY || defined TARGET_IS_SPARC
+#if defined TARGET_HAS_MULTIPLY || defined TARGET_IS_SPARC || defined TARGET_INLINES_CONSTANT_MULTIPLY
     if (commutesp && integer_constant(a2))   /* really just allow MULK */
         return cg_binary(op, a1, a2, commutesp, INTREG);
 #endif

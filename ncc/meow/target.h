@@ -61,6 +61,8 @@
                               ((op) & J_TABLE_BITS) == J_EORR)
 
 #define TARGET_HAS_ROTATE               1
+/* a multiply by a constant is shifts and adds in line, not a call */
+#define TARGET_INLINES_CONSTANT_MULTIPLY 1
 #define TARGET_STACK_MOVES_ONCE         1
 #define DO_NOT_EXPLOIT_REGISTERS_PRESERVED_BY_CALLEE 1
 #define TARGET_LACKS_RR_UNALIGNED_ACCESSES 1
