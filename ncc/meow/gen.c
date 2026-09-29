@@ -878,6 +878,19 @@ static bool inline_ll(Symstr *name)
         out_bitr(R_A1, 2, NO, R_A1 + 1);
         return YES;
     }
+    if (is_ll(name, sim.llcmpeq) || is_ll(name, sim.llcmpne)) {
+        /* proper 0 or 1, as the library gives */
+        ll_bitop(3);
+        out_bitr(R_A1, 2, NO, R_A1 + 1);
+        out_cmpk(R_A1, 0);
+        load_integer(R_A1 + 1, is_ll(name, sim.llcmpeq) ? 1 : 0);
+        l = nextlabel();
+        branch_to(C_EQ, l);
+        load_integer(R_A1 + 1, is_ll(name, sim.llcmpeq) ? 0 : 1);
+        setlabel(l);
+        out_mov(R_A1, R_A1 + 1);
+        return YES;
+    }
     return NO;
 }
 
