@@ -5585,6 +5585,7 @@ typedef struct {
     bool bad;
     bool has_jumps;                 /* a continue or goto in the body */
     int cond_depth;                 /* >0 inside anything not run once per time round */
+    int in_inner;                   /* >0 inside a nested loop, whose own pass does it */
     bool in_test;
     int nptrs;
     struct {
@@ -5937,6 +5938,10 @@ static bool sr_try_node(SRState *s, Expr *e)
     int32 scale;
     int i;
 
+    /* A reference inside a nested loop would need a pointer live right
+     * across it, which spills on a machine this short of registers;
+     * the inner loop's own pass gets the inner index at least. */
+    if (s->in_inner > 0) return NO;
     if (h0_(e) != s_plus || !sr_is_pointer_typed(e)) return NO;
     if (sr_index(s, arg2_(e), &scale)) { a = arg1_(e); x = arg2_(e); }
     else if (sr_index(s, arg1_(e), &scale)) { a = arg2_(e); x = arg1_(e); }
@@ -6015,15 +6020,15 @@ static void sr_rewrite_cmd(SRState *s, Cmd *x)
             s->cond_depth--;
             return;
         case s_do:
-            s->cond_depth++;
+            s->cond_depth++; s->in_inner++;
             sr_rewrite_cmd(s, cmd1c_(x)); sr_rewrite_expr(s, cmd2e_(x));
-            s->cond_depth--;
+            s->cond_depth--; s->in_inner--;
             return;
         case s_for:
-            s->cond_depth++;
+            s->cond_depth++; s->in_inner++;
             sr_rewrite_expr(s, cmd1e_(x)); sr_rewrite_expr(s, cmd2e_(x)); sr_rewrite_expr(s, cmd3e_(x));
             sr_rewrite_cmd(s, cmd4c_(x));
-            s->cond_depth--;
+            s->cond_depth--; s->in_inner--;
             return;
         case s_switch:
             sr_rewrite_expr(s, cmd1e_(x));
