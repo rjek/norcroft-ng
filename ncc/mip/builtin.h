@@ -91,6 +91,9 @@ extern Symstr *traproutine, *targeterrno;
 
 typedef struct op_simulation {
    Expr *mulfn, *divfn, *udivfn, *divtestfn, *remfn, *uremfn;
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+   Expr *umulhifn, *smulhifn;
+#endif
 #ifdef TARGET_HAS_DIV_10_FUNCTION
    Expr *div10fn, *udiv10fn, *rem10fn, *urem10fn;
 #endif

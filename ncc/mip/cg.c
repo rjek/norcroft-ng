@@ -691,6 +691,133 @@ static VRegnum simulate_remainder(TypeExpr *t, Expr *a1, Expr *a2)
 #endif
 #endif
 
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+/* ---- division by a constant as a multiply by its reciprocal ------------ */
+/* The magic numbers are Granlund and Montgomery's, computed as in Hacker's
+ * Delight: q = mulhi(x, m) >> s, with an add of x first when m would not
+ * fit in 32 bits (unsigned), or a sign fix-up (signed). */
+
+typedef struct { uint32 m; int add; int s; } Magic;
+
+static Magic magic_unsigned(uint32 d)
+{
+    Magic mg;
+    int p = 31;
+    uint32 nc = (uint32)-1 - (uint32)(-(int32)d) % d;
+    uint32 q1 = 0x80000000u / nc, r1 = 0x80000000u - q1 * nc;
+    uint32 q2 = 0x7fffffffu / d, r2 = 0x7fffffffu - q2 * d;
+    uint32 delta;
+
+    mg.add = 0;
+    do {
+        p++;
+        if (r1 >= nc - r1) { q1 = 2 * q1 + 1; r1 = 2 * r1 - nc; }
+        else { q1 = 2 * q1; r1 = 2 * r1; }
+        if (r2 + 1 >= d - r2) {
+            if (q2 >= 0x7fffffffu) mg.add = 1;
+            q2 = 2 * q2 + 1; r2 = 2 * r2 + 1 - d;
+        } else {
+            if (q2 >= 0x80000000u) mg.add = 1;
+            q2 = 2 * q2; r2 = 2 * r2 + 1;
+        }
+        delta = d - 1 - r2;
+    } while (p < 64 && (q1 < delta || (q1 == delta && r1 == 0)));
+    mg.m = q2 + 1;
+    mg.s = p - 32;
+    return mg;
+}
+
+static Magic magic_signed(int32 d)
+{
+    Magic mg;
+    int p = 31;
+    uint32 two31 = 0x80000000u;
+    uint32 ad = d < 0 ? (uint32)-d : (uint32)d;
+    uint32 t = two31 + ((uint32)d >> 31);
+    uint32 anc = t - 1 - t % ad;
+    uint32 q1 = two31 / anc, r1 = two31 - q1 * anc;
+    uint32 q2 = two31 / ad, r2 = two31 - q2 * ad;
+    uint32 delta;
+
+    mg.add = 0;
+    do {
+        p++;
+        q1 = 2 * q1; r1 = 2 * r1;
+        if (r1 >= anc) { q1++; r1 -= anc; }
+        q2 = 2 * q2; r2 = 2 * r2;
+        if (r2 >= ad) { q2++; r2 -= ad; }
+        delta = ad - r2;
+    } while (q1 < delta || (q1 == delta && r1 == 0));
+    mg.m = q2 + 1;
+    if (d < 0) mg.m = (uint32)-(int32)mg.m;
+    mg.s = p - 32;
+    return mg;
+}
+
+static Expr *shifted_right(TypeExpr *t, Expr *e, int n)
+{
+    return n == 0 ? e : mk_expr2(s_rightshift, t, e, mkintconst(te_int, n, 0));
+}
+
+/* x / k or x % k, k a constant that is not a power of two, as a tree:
+ * { T gx = x, gq; gq = ...; rem ? gx - gq * k : gq }.  GAP if k is one
+ * the library had better keep. */
+static VRegnum cg_const_divide(Expr *x, bool uns, bool rem)
+{
+    TypeExpr *t = uns ? te_uint : te_int;
+    int32 k;
+    Magic mg;
+    Binder *gx, *gq, *gt;
+    Expr *hi, *q, *body, *result;
+    SynBindList *bl;
+
+    if (!integer_constant(arg2_(x))) return GAP;
+    k = result2;
+    if (uns) {
+        if ((uint32)k < 2) return GAP;
+        mg = magic_unsigned((uint32)k);
+    } else {
+        if (k == 0 || k == 1 || k == -1 || k == (int32)0x80000000) return GAP;
+        mg = magic_signed(k);
+    }
+    gx = gentempbinder(t);
+    gq = gentempbinder(t);
+    gt = gentempbinder(t);
+    bl = mkSynBindList(mkSynBindList(mkSynBindList(0, gx), gq), gt);
+    hi = mk_expr2(s_fnap, t, uns ? sim.umulhifn : sim.smulhifn,
+                  mkArgList2((Expr *)gx, mkintconst(t, (int32)mg.m, 0)));
+    if (uns && mg.add) {
+        /* q = (t + ((x - t) >> 1)) >> (s - 1) with t = mulhi(x, m) */
+        q = mk_expr2(s_comma, t,
+                mk_expr2(s_assign, t, (Expr *)gt, hi),
+                shifted_right(t,
+                    mk_expr2(s_plus, t, (Expr *)gt,
+                        shifted_right(t, mk_expr2(s_minus, t, (Expr *)gx, (Expr *)gt), 1)),
+                    mg.s - 1));
+    } else if (uns) {
+        q = shifted_right(t, hi, mg.s);
+    } else {
+        q = hi;
+        if (k > 0 && (int32)mg.m < 0) q = mk_expr2(s_plus, t, q, (Expr *)gx);
+        if (k < 0 && (int32)mg.m > 0) q = mk_expr2(s_minus, t, q, (Expr *)gx);
+        q = shifted_right(t, q, mg.s);
+        /* round towards zero: add one for a negative quotient */
+        q = mk_expr2(s_comma, t,
+                mk_expr2(s_assign, t, (Expr *)gq, q),
+                mk_expr2(s_minus, t, (Expr *)gq, shifted_right(t, (Expr *)gq, 31)));
+    }
+    result = mk_expr2(s_assign, t, (Expr *)gq, q);
+    if (rem)
+        result = mk_expr2(s_comma, t, result,
+                    mk_expr2(s_minus, t, (Expr *)gx,
+                        mk_expr2(s_times, t, (Expr *)gq, mkintconst(t, k, 0))));
+    body = mk_expr2(s_comma, t,
+               mk_expr2(s_assign, t, (Expr *)gx, arg1_(x)),
+               result);
+    return cg_expr(mk_exprlet(s_let, t, bl, body));
+}
+#endif /* TARGET_INLINES_CONSTANT_DIVIDE */
+
 #ifdef ADDRESS_REG_STUFF
 static VRegnum ensure_regtype(VRegnum r, RegSort rsort)
 {
@@ -1137,16 +1264,27 @@ case s_div:
 /* can't the unsignedness property get in rsort? */
         else if (mcmode==1)
         {   int32 p;
-            r = ((p = ispoweroftwo(arg2_(x))) != 0) ?
-                cg_binary(J_SHRR+J_UNSIGNED, arg1_(x),
-                          mkintconst(te_int,p,0), 0, rsort) :
-                cg_divrem(J_DIVR+J_UNSIGNED, type_(x), sim.udivfn,
-                          arg1_(x), arg2_(x));
+            if ((p = ispoweroftwo(arg2_(x))) != 0)
+                r = cg_binary(J_SHRR+J_UNSIGNED, arg1_(x),
+                              mkintconst(te_int,p,0), 0, rsort);
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+            else if ((r = cg_const_divide(x, YES, NO)) != GAP)
+                ;
+#endif
+            else
+                r = cg_divrem(J_DIVR+J_UNSIGNED, type_(x), sim.udivfn,
+                              arg1_(x), arg2_(x));
         }
         else
         {
 #if !defined(TARGET_HAS_DIVIDE) && !defined(TARGET_HAS_NONFORTRAN_DIVIDE)
             int32 p;
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+            if (ispoweroftwo(arg2_(x)) == 0 &&
+                (r = cg_const_divide(x, NO, NO)) != GAP)
+                ;
+            else
+#endif
             if ((p = ispoweroftwo(arg2_(x))) != 0)
             {   /* e.g. (signed)  z/8 == (z>=0 ? z:z+7) >> 3 (even MIN_INT) */
                 /* Do not forge such an expression since (a) we cannot      */
@@ -1191,6 +1329,11 @@ case s_rem:
                 return cg_binary(J_ANDR, arg1_(x),
                                  mkintconst(te_int,lowerbits(p),0),
                                  0, rsort);
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+            {   VRegnum r = cg_const_divide(x, YES, YES);
+                if (r != GAP) return r;
+            }
+#endif
 #ifdef TARGET_LACKS_REMAINDER
             return simulate_remainder(type_(x), arg1_(x), arg2_(x));
 #else
@@ -1223,6 +1366,11 @@ case s_rem:
 #endif
             if (isminusone(arg2_(x)))
                 return cg_loadzero(arg1_(x));   /* required by s_div defn */
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+            {   VRegnum r = cg_const_divide(x, NO, YES);
+                if (r != GAP) return r;
+            }
+#endif
 #ifdef TARGET_LACKS_REMAINDER
             return simulate_remainder(type_(x), arg1_(x), arg2_(x));
 #else

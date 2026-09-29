@@ -63,6 +63,11 @@
 #define TARGET_HAS_ROTATE               1
 /* a multiply by a constant is shifts and adds in line, not a call */
 #define TARGET_INLINES_CONSTANT_MULTIPLY 1
+/* A divide by a constant can be a multiply by its reciprocal through
+ * __umulhi, but without a multiplier that measured slower than __udiv for
+ * every dividend size (twice as slow for large ones, nine times for small),
+ * so it stays off until there is hardware to make it pay. */
+#undef TARGET_INLINES_CONSTANT_DIVIDE
 /* no indexed addressing: for loops over arrays get stepped pointers */
 #define TARGET_WANTS_STRENGTH_REDUCTION 1
 #define TARGET_STACK_MOVES_ONCE         1

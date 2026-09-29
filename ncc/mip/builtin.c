@@ -270,6 +270,10 @@ void Builtin_LoadState(FILE *f) {
     sim.divtestfn = Dump_LoadExpr(f);
     sim.remfn = Dump_LoadExpr(f);
     sim.uremfn = Dump_LoadExpr(f);
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+    sim.umulhifn = Dump_LoadExpr(f);
+    sim.smulhifn = Dump_LoadExpr(f);
+#endif
     sim.fdivfn = Dump_LoadExpr(f);
     sim.ddivfn = Dump_LoadExpr(f);
 #ifdef TARGET_HAS_DIV_10_FUNCTION
@@ -437,6 +441,10 @@ void Builtin_DumpState(FILE *f) {
     Dump_Expr(sim.divtestfn, f);
     Dump_Expr(sim.remfn, f);
     Dump_Expr(sim.uremfn, f);
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+    Dump_Expr(sim.umulhifn, f);
+    Dump_Expr(sim.smulhifn, f);
+#endif
     Dump_Expr(sim.fdivfn, f);
     Dump_Expr(sim.ddivfn, f);
 #ifdef TARGET_HAS_DIV_10_FUNCTION
@@ -627,6 +635,10 @@ void builtin_init(void)
     sim.divtestfn = library_function("__divtest", 1, 1, PUREBIT);
     sim.remfn = library_function("__mod", 2, 2, PUREBIT);
     sim.uremfn = library_function("__umod", 2, 2, PUREBIT);
+#ifdef TARGET_INLINES_CONSTANT_DIVIDE
+    sim.umulhifn = library_function("__umulhi", 2, 2, PUREBIT);
+    sim.smulhifn = library_function("__smulhi", 2, 2, PUREBIT);
+#endif
     sim.fdivfn = library_function("__fdiv", 2, 2, PUREBIT);
     sim.ddivfn = library_function("__ddiv", 2, 2, PUREBIT);
 #elif defined(TARGET_IS_UNIX) && !defined(TARGET_IS_SPARC) && !defined(TARGET_IS_ALPHA)
