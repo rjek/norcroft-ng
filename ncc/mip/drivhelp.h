@@ -43,6 +43,7 @@ static msg_t driver_help_text[] = {
     help_include_J,             /* -J<directory> */
     help_libraries,             /* -L<libs> */
     help_output,                /* -o<file> */
+    help_optimise_for,          /* -Otime, -Ospace */
     help_profile,               /* -P<options> */
     help_output_assembler,      /* -S */
     help_preundefine,           /* -U<symbol> */
@@ -68,6 +69,7 @@ static msg_t driver_help_text[] = {
     help_include_J,             /* -J<directory> */
     help_libraries,             /* -L<libs> */
     help_output,                /* -o<file> */
+    help_optimise_for,          /* -Otime, -Ospace */
     help_profile,               /* -P<options> */
     help_output_assembler,      /* -S */
     help_preundefine,           /* -U<symbol> */
@@ -91,6 +93,7 @@ static msg_t driver_help_text[] = {
     help_include_J,             /* -I<directory> */
     help_libraries,             /* -L<libs> */
     help_output,                /* -o<file> */
+    help_optimise_for,          /* -Otime, -Ospace */
     help_profile,               /* -P<options> */
     help_output_assembler,      /* -S */
     help_preundefine,           /* -U<symbol> */

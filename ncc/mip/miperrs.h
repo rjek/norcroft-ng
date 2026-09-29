@@ -555,6 +555,9 @@ Usage:         %s [options] file1 file2 ... filen\n"
 -o <file>      Instruct the linker to name the object code produced <file>\n"
 #define help_optimised           "\
 -O             Invoke the object code improver\n"
+#define help_optimise_for        "\
+-Otime         Optimise for speed rather than size, or with -Ospace the\n\
+               other way round; the default balances the two\n"
 #define help_onetrip             "\
 -onetrip       Compile DO loops that are performed at least once if reached\n"
 #define help_profile             "\
