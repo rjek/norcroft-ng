@@ -80,8 +80,10 @@ extern bool reads_psr(Icode const *ic);
 extern bool uses_psr(Icode const *ic);
 extern bool corrupts_psr(Icode const *ic);
 
+#ifndef corrupts_r1
 extern bool corrupts_r1(Icode const* ic);
 extern bool corrupts_r2(Icode const* ic);
+#endif
 
 extern bool has_side_effects(Icode const *ic);
 extern void remove_writeback(Icode *ic);

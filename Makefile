@@ -93,6 +93,7 @@ BIN_NCC    := $(BIN_DIR)/ncc$(BIN_SUFFIX)$(CHECK_SUFFIX)
 BIN_NCPP   := $(BIN_DIR)/n++$(BIN_SUFFIX)$(CHECK_SUFFIX)
 BIN_NTCC   := $(BIN_DIR)/ntcc$(BIN_SUFFIX)$(CHECK_SUFFIX)
 BIN_NTCPP  := $(BIN_DIR)/nt++$(BIN_SUFFIX)$(CHECK_SUFFIX)
+BIN_NMCC   := $(BIN_DIR)/nmcc$(BIN_SUFFIX)$(CHECK_SUFFIX)
 BIN_INTERP := $(BIN_DIR)/npp$(BIN_SUFFIX)$(CHECK_SUFFIX)
 BIN_CLBCOMP:= $(BIN_DIR)/clbcomp$(BIN_SUFFIX)$(CHECK_SUFFIX)
 .SECONDARY:
@@ -102,6 +103,7 @@ OPTIONS_ncc     := ccarm
 OPTIONS_n++     := cpparm
 OPTIONS_ntcc    := ccthumb
 OPTIONS_nt++    := cppthumb
+OPTIONS_nmcc    := ccmeow
 OPTIONS_interp  := cppint
 OPTIONS_clbcomp := clbcomp
 
@@ -111,7 +113,7 @@ OPTIONS_riscos 	 := ccacorn
 OPTIONS_newton   := ccapple
 
 # Determine the tool being built (ncc/n++/ntcc/nt++/interp/clbcomp)
-BUILD_TOOL := $(firstword $(filter ncc n++ ntcc nt++ interp clbcomp,$(MAKECMDGOALS)))
+BUILD_TOOL := $(firstword $(filter ncc n++ ntcc nt++ nmcc interp clbcomp,$(MAKECMDGOALS)))
 
 # Provide a sensible default if invoked without an explicit goal (e.g. `make`)
 BUILD_TOOL := $(if $(BUILD_TOOL),$(BUILD_TOOL),ncc)
@@ -123,7 +125,7 @@ OPTIONS_DIR  := $(if $(filter arm,$(TARGET)),$(OPTIONS_DEFAULT_DIR),$(OPTIONS_OV
 
 # Select backend early, based on the requested build tool
 # thumb for ntcc/nt++, arm otherwise (can still be overridden by command line)
-BACKEND ?= $(if $(filter ntcc nt++,$(BUILD_TOOL)),thumb,arm)
+BACKEND ?= $(if $(filter ntcc nt++,$(BUILD_TOOL)),thumb,$(if $(filter nmcc,$(BUILD_TOOL)),meow,arm))
 BACKEND_DIR := $(NCC_ROOT)/$(BACKEND)
 
 DERIVED_DIR := $(DERIVED_ROOT)/$(TARGET)/$(BACKEND)
@@ -291,6 +293,9 @@ ARM_SRCS   := \
 THUMB_SRCS := \
   $(ARM_THUMB_SRCS) thumb/asm.c thumb/gen.c thumb/mcdep.c thumb/peephole.c
 
+MEOW_SRCS := \
+  meow/asm.c meow/gen.c meow/mcdep.c meow/obj.c meow/dbg.c armthumb/tooledit.c
+
 INTERP_SRCS := \
   $(CC_CORE_SRCS) $(CPPFE_SRCS) $(CFE_SRCS) \
   interp/interp.c \
@@ -332,6 +337,10 @@ SUPPORT_SRCS += \
  ncc-support/vfp.c
 endif
 
+ifeq ($(BACKEND),meow)
+SUPPORT_SRCS += ncc-support/disass-meow.c ncc-support/meow_isa.c
+endif
+
 ifeq ($(BACKEND),thumb)
 SUPPORT_SRCS += ncc-support/disass-thumb.c
 ifeq ($(BUILD_TOOL), nt++)
@@ -343,7 +352,10 @@ endif
 endif
 
 # Generated source and header files.
-DERIVED_SRCS := $(DERIVED_DIR)/headers.c $(DERIVED_DIR)/peeppat.c
+DERIVED_SRCS := $(DERIVED_DIR)/headers.c
+ifneq ($(BACKEND),meow)
+DERIVED_SRCS += $(DERIVED_DIR)/peeppat.c
+endif
 DERIVED_HDRS := $(DERIVED_DIR)/errors.h $(DERIVED_DIR)/tags.h
 DERIVED_STAMP := $(DERIVED_DIR)/.generated
 
@@ -362,7 +374,7 @@ CLIB_HDRS_DIR := external/clib/include/
 ERRS_H := \
 	$(NCC_ROOT)/mip/miperrs.h \
 	$(NCC_ROOT)/cfe/feerrs.h \
-	$(NCC_ROOT)/armthumb/mcerrs.h
+	$(if $(filter meow,$(BACKEND)),$(NCC_ROOT)/meow/mcerrs.h,$(NCC_ROOT)/armthumb/mcerrs.h)
 
 $(DERIVED_STAMP): $(DERIVED_SRCS) $(DERIVED_HDRS) | $(DERIVED_DIR)
 	@touch $@
@@ -393,17 +405,20 @@ NCC_SRCS   := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(ARM_SRCS))
 NCPP_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CPPFE_SRCS) $(ARM_SRCS))
 NTCC_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(THUMB_SRCS))
 NTCPP_SRCS := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CPPFE_SRCS) $(THUMB_SRCS))
+NMCC_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(MEOW_SRCS))
 
 NCC_SRCS   += $(SUPPORT_SRCS)
 NCPP_SRCS  += $(SUPPORT_SRCS)
 NTCC_SRCS  += $(SUPPORT_SRCS)
 NTCPP_SRCS += $(SUPPORT_SRCS)
+NMCC_SRCS  += $(SUPPORT_SRCS)
 
 # .o files in build/obj/<tool>/...
 NCC_OBJS     := $(addprefix $(OBJ_DIR)/ncc/,$(NCC_SRCS:.c=.o))
 NCPP_OBJS    := $(addprefix $(OBJ_DIR)/n++/,$(NCPP_SRCS:.c=.o))
 NTCC_OBJS    := $(addprefix $(OBJ_DIR)/ntcc/,$(NTCC_SRCS:.c=.o))
 NTCPP_OBJS   := $(addprefix $(OBJ_DIR)/nt++/,$(NTCPP_SRCS:.c=.o))
+NMCC_OBJS    := $(addprefix $(OBJ_DIR)/nmcc/,$(NMCC_SRCS:.c=.o))
 INTERP_OBJS  := $(addprefix $(OBJ_DIR)/interp/,$(INTERP_SRCS:.c=.o))
 CLBCOMP_OBJS := $(addprefix $(OBJ_DIR)/clbcomp/,$(CLBCOMP_SRCS:.c=.o))
 
@@ -412,6 +427,7 @@ $(OBJ_DIR)/ncc/%.o \
 $(OBJ_DIR)/n++/%.o \
 $(OBJ_DIR)/ntcc/%.o \
 $(OBJ_DIR)/nt++/%.o \
+$(OBJ_DIR)/nmcc/%.o \
 $(OBJ_DIR)/interp/%.o \
 $(OBJ_DIR)/clbcomp/%.o: \
 $(OBJ_DIR)/ncc-support/%.o | $(DERIVED_STAMP)
@@ -428,7 +444,7 @@ HEADERS_OBJ := $(OBJ_DIR)/headers.o
 
 #
 # top-level goals
-.PHONY: all ncc n++ ntcc nt++ interp clbcomp \
+.PHONY: all ncc n++ ntcc nt++ nmcc interp clbcomp \
         arm_variants clean distclean print
 all: ncc n++
 
@@ -455,6 +471,7 @@ ncc:     $(BIN_NCC)
 n++:     $(BIN_NCPP)
 ntcc:    $(BIN_NTCC)
 nt++:    $(BIN_NTCPP)
+nmcc:    $(BIN_NMCC)
 interp:  $(BIN_INTERP)
 clbcomp: $(BIN_CLBCOMP)
 
@@ -510,6 +527,12 @@ $(OBJ_DIR)/nt++/%.o: $(SRC_ROOT)%.c $(BOOTSTRAP_NCC_RISCOS) | $(DERIVED_STAMP)
 	$(CC) $(CFLAGS) $(CFLAGS_nt++) $(INC_COMMON) $(DEPFLAGS) -c $< -o $@
 	$(DEPCMD) $(CFLAGS_nt++) $< $(DEPREDIR)
 
+# nmcc (MEOW C)
+$(OBJ_DIR)/nmcc/%.o: $(SRC_ROOT)%.c $(BOOTSTRAP_NCC_RISCOS) | $(DERIVED_STAMP)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) $(INC_COMMON) $(DEPFLAGS) -c $< -o $@
+	$(DEPCMD) $< $(DEPREDIR)
+
 # interp
 $(OBJ_DIR)/interp/%.o: $(SRC_ROOT)%.c $(BOOTSTRAP_NCC_RISCOS) | $(DERIVED_STAMP)
 	@mkdir -p $(dir $@)
@@ -540,6 +563,8 @@ $(BIN_NTCC):    $(NTCC_OBJS)    $(HEADERS_OBJ) | $(BIN_DIR)
 
 $(BIN_NTCPP):   $(NTCPP_OBJS)   $(HEADERS_OBJ) | $(BIN_DIR)
 	$(LD) $(LDFLAGS) -o $@ $^ $(LDLIBS)
+$(BIN_NMCC):    $(NMCC_OBJS)    $(HEADERS_OBJ) | $(BIN_DIR)
+	$(LD) $(LDFLAGS) -o $@ $^ $(LDLIBS)
 
 $(BIN_INTERP):  $(INTERP_OBJS)  $(HEADERS_OBJ) | $(BIN_DIR)
 	$(LD) $(LDFLAGS) -o $@ $^ $(LDLIBS)
@@ -551,7 +576,7 @@ $(BIN_CLBCOMP): $(CLBCOMP_OBJS) $(HEADERS_OBJ) | $(BIN_DIR)
 $(HOSTTOOLS_DIR):
 	mkdir -p $@
 
-$(DERIVED_DIR) $(OBJ_DIR)/ncc $(OBJ_DIR)/n++ $(OBJ_DIR)/ntcc $(OBJ_DIR)/nt++ $(OBJ_DIR)/interp $(OBJ_DIR)/clbcomp $(BIN_DIR):
+$(DERIVED_DIR) $(OBJ_DIR)/ncc $(OBJ_DIR)/n++ $(OBJ_DIR)/ntcc $(OBJ_DIR)/nt++ $(OBJ_DIR)/nmcc $(OBJ_DIR)/interp $(OBJ_DIR)/clbcomp $(BIN_DIR):
 	mkdir -p $@
 
 # genhdrs - built for and run on the host
@@ -585,6 +610,7 @@ DEPS := $(NCC_OBJS:.o=.d) \
         $(NCPP_OBJS:.o=.d) \
         $(NTCC_OBJS:.o=.d) \
         $(NTCPP_OBJS:.o=.d) \
+        $(NMCC_OBJS:.o=.d) \
         $(INTERP_OBJS:.o=.d) \
         $(CLBCOMP_OBJS:.o=.d) \
         $(HEADERS_OBJ:.o=.d)

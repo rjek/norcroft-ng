@@ -9,6 +9,8 @@ encouraged to have their own version numbering.
 
 Code is emitted in AOF files and supports several targets: ARM's generic 32-bit
 development platform, RISC OS (32-bit and 26-bit), and Apple Newton (untested).
+There is also a backend for MEOW, a toy 16-bit-instruction RISC
+microcontroller, built as `nmcc`; it produces assembler for MEOW's `mas`.
 
 ## Contents
 
@@ -61,6 +63,11 @@ RISC OS-native compiler to run on RISC OS 5. Builds `bin/ncc,ff8`, where ff8
 is the 'Absolute' filetype for a RISC OS executable:
 ```
 make ncc TARGET=riscos HOST=riscos
+```
+
+MEOW C compiler, `bin/nmcc` (assembler output only, `-S`):
+```
+make nmcc
 ```
 
 ### Other useful make targets:

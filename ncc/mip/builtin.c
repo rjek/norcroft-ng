@@ -619,7 +619,17 @@ void builtin_init(void)
     te_intptr = g_ptrtotype_(te_int);
     te_voidptr = g_ptrtotype_(te_void);
 
-#if defined(TARGET_IS_UNIX) && !defined(TARGET_IS_SPARC) && !defined(TARGET_IS_ALPHA)
+#if defined(TARGET_IS_MEOW)
+    /* MABI runtime support, see docs/abi.md in the MEOW repository */
+    sim.mulfn = library_function("__mul", 2, 2, PUREBIT);
+    sim.divfn = library_function("__div", 2, 2, PUREBIT);
+    sim.udivfn = library_function("__udiv", 2, 2, PUREBIT);
+    sim.divtestfn = library_function("__divtest", 1, 1, PUREBIT);
+    sim.remfn = library_function("__mod", 2, 2, PUREBIT);
+    sim.uremfn = library_function("__umod", 2, 2, PUREBIT);
+    sim.fdivfn = library_function("__fdiv", 2, 2, PUREBIT);
+    sim.ddivfn = library_function("__ddiv", 2, 2, PUREBIT);
+#elif defined(TARGET_IS_UNIX) && !defined(TARGET_IS_SPARC) && !defined(TARGET_IS_ALPHA)
     sim.mulfn = library_function("x$mul", 2, 2, PUREBIT);
     sim.divfn = library_function("x$div", 2, 2, PUREBIT);
     sim.udivfn = library_function("x$udiv", 2, 2, PUREBIT);

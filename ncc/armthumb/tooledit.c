@@ -21,8 +21,13 @@
 #include "toolenv.h"
 #include "tooledit.h"
 
+/* Thumb and MEOW have no processor or architecture tables to edit. */
+#if defined(TARGET_IS_THUMB) || defined(TARGET_IS_MEOW)
+#  define TOOLEDIT_NO_PROCESSOR_TABLES 1
+#endif
+
 static bool IsReadOnly(ToolEnv *t, char const *name) {
-#ifdef TARGET_IS_THUMB
+#ifdef TOOLEDIT_NO_PROCESSOR_TABLES
   if (StrEq(name, "-arch")
       || StrEq(name, "-cpu"))
     return YES;
@@ -79,7 +84,7 @@ static EnvInit const nofp_implies[] =    { { "-D__APCS_NOFP", "?"}, {0, 0} };
 static EnvInit const softfp_implies[] =  { { "-D__SOFTFP__", "?"}, { "-D__SOFT_DOUBLES__", "?"}, {0, 0} };
 static EnvInit const softd_implies[] =   { { "-D__SOFTFP__", "="}, { "-D__SOFT_DOUBLES__", "?"}, {0, 0} };
 static EnvInit const nofpr_implies[]  =  { { "-D__PCS_FPREGARGS", "="}, {0, 0} };
-#ifndef TARGET_IS_THUMB
+#ifndef TOOLEDIT_NO_PROCESSOR_TABLES
 static EnvInit const b26_implies[] =     { { "-D__APCS_32", "="}, {0, 0} };
 static EnvInit const fp_implies[] =      { { "-D__APCS_NOFP", "="}, {0, 0} };
 static EnvInit const hardfp_implies[] =  { { "-D__SOFTFP__", "="}, { "-D__SOFT_DOUBLES__", "="}, {0, 0} };
@@ -94,7 +99,7 @@ static EnvValImplies const swst_vals[] = { {"#/swst", swst_implies}, {"#/noswst"
 static EnvValImplies const reent_vals[] = { {"#/reent", reent_implies}, {"#/noreent", noreent_implies}, {NULL, NULL} };
 static EnvValImplies const inter_vals[] = { {"#/interwork", inter_implies}, {"#/nointerwork", nointer_implies}, {NULL, NULL} };
 static EnvValImplies const sex_vals[] = { {"=-bi", bi_implies}, {"=-li", li_implies}, {NULL, NULL} };
-#ifndef TARGET_IS_THUMB
+#ifndef TOOLEDIT_NO_PROCESSOR_TABLES
 static EnvValImplies const softfp_vals[] = { {"#/softfp", softfp_implies}, {"#/hardfp", hardfp_implies},
                                              {"#/softdoubles", softd_implies}, {NULL, NULL} };
 static EnvValImplies const fpr_vals[] = { {"#/fpregargs", fpr_implies}, {"#/nofpregargs", nofpr_implies}, {NULL, NULL} };
@@ -144,7 +149,7 @@ static KnownVals const known[] = {
   {"-apcs.reent",  reent_vals },
   {"-apcs.inter",  inter_vals },
   {".bytesex",     sex_vals },
-#ifndef TARGET_IS_THUMB
+#ifndef TOOLEDIT_NO_PROCESSOR_TABLES
   {"-apcs.softfp", softfp_vals },
   {"-apcs.fpr",    fpr_vals },
   {"-apcs.fp",     fp_vals },
@@ -197,7 +202,7 @@ typedef struct {
 } FixedVals;
 
 static FixedVals const fixedvals[] = {
-#ifdef TARGET_IS_THUMB
+#ifdef TOOLEDIT_NO_PROCESSOR_TABLES
   {"-cpu",         {"#ARM7TM", NULL} },
   {"-arch",        {"#4T", NULL} },
   {"-apcs.softfp", {"#/softfp", softfp_implies} },
@@ -284,7 +289,7 @@ ToolEdit_InsertStatus tooledit_insertwithjoin(
   if (join != '=' && join != '#') {
     if (join != '?' || value[0] != 0) return TE_Failed;
   }
-#ifndef TARGET_IS_THUMB
+#ifndef TOOLEDIT_NO_PROCESSOR_TABLES
   if (StrEq(name, "-cpu") || StrEq(name, "-arch")) {
     char a[32], c[32];
     Processor const *cpu;
@@ -434,7 +439,7 @@ static char const * const langname[] = {
   NULL
 };
 
-#ifdef TARGET_IS_THUMB
+#ifdef TOOLEDIT_NO_PROCESSOR_TABLES
 static int valuecount_docpu(void) {
     return 1;
 }
