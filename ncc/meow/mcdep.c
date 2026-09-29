@@ -229,12 +229,6 @@ void RealRegisterUse(Icode const *ic, RealRegUse *u)
     u->c_out.map[0] = c_out;
 }
 
-Expr *rd_asm_decl(void)
-{
-    cc_err(gen_err_inlineasm);
-    return errornode;
-}
-
 bool immed_cmp(int32 n)
 {
     return n >= -128 && n <= 127;

@@ -80,8 +80,11 @@ extern bool reads_psr(Icode const *ic);
 extern bool uses_psr(Icode const *ic);
 extern bool corrupts_psr(Icode const *ic);
 
+/* jopcode.h defines these as macros for targets that don't need them.  */
 #ifndef corrupts_r1
 extern bool corrupts_r1(Icode const* ic);
+#endif
+#ifndef corrupts_r2
 extern bool corrupts_r2(Icode const* ic);
 #endif
 

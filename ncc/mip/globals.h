@@ -225,6 +225,19 @@ extern int32 rtcheck;
 #endif
 
 /*
+ * The version of C being compiled (-std=), as __STDC_VERSION__ gives it.
+ * CStd(v) is whether it is at least v, and never is when compiling C++.
+ */
+#define STD_C90 199409L
+#define STD_C99 199901L
+#define STD_C11 201112L
+#define STD_C17 201710L
+#define STD_C23 202311L
+#define BITINT_MAXWIDTH 64           /* the widest C23 _BitInt */
+extern int32 cc_std;
+#define CStd(v) (!LanguageIsCPlusPlus && cc_std >= (v))
+
+/*
  * Dynamic configuration flags.
  */
 extern int32 config;
@@ -290,6 +303,7 @@ typedef struct CurrentFnDetails {
     Binder *structresult;
     VRegnum baseresultreg;
     int nresultregs;
+    int32 resultrep;          /* mcrep of the result type, 0 if void */
     int32 flags, auxflags;
     int32 maxstack;
     int32 maxargsize;

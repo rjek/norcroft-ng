@@ -6,11 +6,14 @@
 #   make ntcc                   # C compiler (Thumb backend)
 #   make nt++                   # C++ compiler (Thumb backend)
 #   make all                    # ncc & n++
+#   make runtime TARGET=i386    # lib/ncc-rt-i386.a (long long support etc.)
 #   make arm_variants          	# Every ARM/Thumb tool/target/host combination
 #   make clean / make distclean
 
 # ncc and n++ can be compiled to target different plaforms:
 #   TARGET=newton	              # Cross compiler targetting Apple Newton
+#   TARGET=i386	              # Cross compiler targeting i386 Linux (ELF, via as)
+#   TARGET=x86_64	              # Cross compiler targeting x86-64 Linux (ELF, via as)
 #
 #   TARGET=riscos	              # Cross compiler targeting 32-bit RISC OS
 #   TARGET=riscos26	            # Cross compiler targeting 26-bit RISC OS
@@ -24,7 +27,7 @@
 # Object files are built in ./build/ (obj/<target>/<host>)
 
 # config toggles ----------------
-TARGET      ?= arm          # arm | riscos | riscos26 | newton
+TARGET      ?= arm          # arm | riscos | riscos26 | newton | i386 | x86_64
 WARN        ?= minimal      # some | minimal | none
 HOST        ?=              # riscos | <blank>
 CHECK       ?=              # asan | msan | <blank>
@@ -111,6 +114,8 @@ OPTIONS_clbcomp := clbcomp
 OPTIONS_riscos26 := ccacorn
 OPTIONS_riscos 	 := ccacorn
 OPTIONS_newton   := ccapple
+OPTIONS_i386     := cci386
+OPTIONS_x86_64   := ccx86_64
 
 # Determine the tool being built (ncc/n++/ntcc/nt++/interp/clbcomp)
 BUILD_TOOL := $(firstword $(filter ncc n++ ntcc nt++ nmcc interp clbcomp,$(MAKECMDGOALS)))
@@ -125,7 +130,12 @@ OPTIONS_DIR  := $(if $(filter arm,$(TARGET)),$(OPTIONS_DEFAULT_DIR),$(OPTIONS_OV
 
 # Select backend early, based on the requested build tool
 # thumb for ntcc/nt++, arm otherwise (can still be overridden by command line)
+# x86 for TARGET=i386 and x86_64; MEOW for the nmcc build.
+ifneq (,$(filter i386 x86_64,$(TARGET)))
+BACKEND ?= x86
+else
 BACKEND ?= $(if $(filter ntcc nt++,$(BUILD_TOOL)),thumb,$(if $(filter nmcc,$(BUILD_TOOL)),meow,arm))
+endif
 BACKEND_DIR := $(NCC_ROOT)/$(BACKEND)
 
 DERIVED_DIR := $(DERIVED_ROOT)/$(TARGET)/$(BACKEND)
@@ -204,8 +214,19 @@ CFLAGS_TARGET += -Dpascal="" -DMSG_TOOL_NAME=\"$(BUILD_TOOL)\" \
                  -DTARGET_IS_APPLEAPGMACHINE=1
 endif
 
+# TARGET=i386
+ifeq ($(TARGET),i386)
+CFLAGS_TARGET += -DTARGET_IS_LINUX -DMSG_TOOL_NAME=\"$(BUILD_TOOL)\" \
+                 -DNCC_RUNTIME_LIB=\"$(abspath $(LIB_DIR))/ncc-rt-i386.a\"
+endif
+
+# TARGET=x86_64
+ifeq ($(TARGET),x86_64)
+CFLAGS_TARGET += -DTARGET_IS_LINUX -DTARGET_IS_X86_64 -DMSG_TOOL_NAME=\"$(BUILD_TOOL)\"
+endif
+
 # TARGET != arm (ie. is one of riscos, riscos26 or newton)
-ifneq ($(TARGET),arm)
+ifneq (,$(filter riscos riscos26 newton,$(TARGET)))
 # There's not a lot of point in compiling a Thumb compiler for RISC OS or
 # Apple Newton, but it works... But as we use ccacorn/ or ccapple/'s options.h
 # for both ARM and Thumb, we need to tell it the backend.
@@ -238,7 +259,7 @@ SUPPORT_DIR := $(SRC_ROOT)ncc-support
 INC_COMMON := \
   -I$(NCC_ROOT)/mip \
   -I$(NCC_ROOT)/cfe \
-  -I$(NCC_ROOT)/armthumb \
+  $(if $(filter arm thumb meow,$(BACKEND)),-I$(NCC_ROOT)/armthumb) \
   -I$(BACKEND_DIR) \
   -I$(NCC_ROOT)/util \
   -I$(HOST_DIR) \
@@ -285,7 +306,7 @@ CPPFE_SRCS := \
 ARM_THUMB_SRCS := \
   armthumb/aaof.c armthumb/arminst.c armthumb/asd.c \
   armthumb/asmcg.c armthumb/asmsyn.c armthumb/dwasd.c \
-  armthumb/tooledit.c
+  mip/tooledit.c
 
 ARM_SRCS   := \
   $(ARM_THUMB_SRCS) arm/asm.c arm/gen.c arm/mcdep.c arm/peephole.c
@@ -293,8 +314,16 @@ ARM_SRCS   := \
 THUMB_SRCS := \
   $(ARM_THUMB_SRCS) thumb/asm.c thumb/gen.c thumb/mcdep.c thumb/peephole.c
 
+X86_SRCS   := \
+  x86/asm.c x86/gen.c x86/mcdep.c mip/tooledit.c
 MEOW_SRCS := \
-  meow/asm.c meow/gen.c meow/mcdep.c meow/obj.c meow/dbg.c armthumb/tooledit.c
+  meow/asm.c meow/gen.c meow/mcdep.c meow/obj.c mip/tooledit.c
+
+# Backend used by ncc and n++ (ntcc and nt++ are always Thumb).
+BACKEND_SRCS_arm   := $(ARM_SRCS)
+BACKEND_SRCS_thumb := $(THUMB_SRCS)
+BACKEND_SRCS_x86   := $(X86_SRCS)
+BACKEND_SRCS_meow  := $(MEOW_SRCS)
 
 INTERP_SRCS := \
   $(CC_CORE_SRCS) $(CPPFE_SRCS) $(CFE_SRCS) \
@@ -313,7 +342,6 @@ CLBCOMP_SRCS := \
 SUPPORT_SRCS := \
   ncc-support/dde.c \
   ncc-support/dem.c \
-  ncc-support/disass.c \
   ncc-support/filestat.c \
   ncc-support/fname.c \
   ncc-support/ieeeflt.c \
@@ -327,6 +355,10 @@ SUPPORT_SRCS := \
 
 ifeq ($(HOST),riscos)
 SUPPORT_SRCS += ncc-support/int64-runtime.c
+endif
+
+ifneq (,$(filter arm thumb,$(BACKEND)))
+SUPPORT_SRCS += ncc-support/disass.c
 endif
 
 ifeq ($(BACKEND),arm)
@@ -351,30 +383,38 @@ SUPPORT_SRCS += \
 endif
 endif
 
-# Generated source and header files.
-DERIVED_SRCS := $(DERIVED_DIR)/headers.c
-ifneq ($(BACKEND),meow)
-DERIVED_SRCS += $(DERIVED_DIR)/peeppat.c
-endif
+# Generated source and header files. Only ARM and Thumb have peepholers.
+DERIVED_SRCS := $(DERIVED_DIR)/headers.c \
+  $(if $(filter arm thumb,$(BACKEND)),$(DERIVED_DIR)/peeppat.c)
 DERIVED_HDRS := $(DERIVED_DIR)/errors.h $(DERIVED_DIR)/tags.h
 DERIVED_STAMP := $(DERIVED_DIR)/.generated
 
 CLIB_HDRS := assert.h ctype.h errno.h float.h iso646.h limits.h \
-			 locale.h math.h setjmp.h signal.h stdarg.h stddef.h \
+			 locale.h math.h setjmp.h signal.h stdalign.h stdarg.h stdbool.h \
+			 stdckdint.h stddef.h stdnoreturn.h \
 			 stdio.h stdlib.h string.h time.h
 CLIB_RISCOS_HDRS := kernel.h stdint.h varargs.h
 
 CLIB_HDRS    += $(if $(filter riscos riscos26,$(TARGET)),$(CLIB_RISCOS_HDRS),)
 
+# Linux targets use the system's headers, except for those the compiler
+# must supply itself.
+CLIB_LINUX_HDRS := float.h iso646.h limits.h stdalign.h stdarg.h stdbool.h \
+                   stdckdint.h stddef.h stdnoreturn.h
+ifneq (,$(filter i386 x86_64,$(TARGET)))
+CLIB_HDRS    := $(CLIB_LINUX_HDRS)
+CLIB_HDRS_DIR = external/clib/linux/$(TARGET)/
+endif
+
 OPTIONS_DIR  := $(if $(filter arm,$(TARGET)),$(OPTIONS_DEFAULT_DIR),$(OPTIONS_OVERRIDE_DIR))
 
-CLIB_HDRS_DIR := external/clib/include/
+CLIB_HDRS_DIR ?= external/clib/include/
 
 # error lists
 ERRS_H := \
 	$(NCC_ROOT)/mip/miperrs.h \
 	$(NCC_ROOT)/cfe/feerrs.h \
-	$(if $(filter meow,$(BACKEND)),$(NCC_ROOT)/meow/mcerrs.h,$(NCC_ROOT)/armthumb/mcerrs.h)
+	$(NCC_ROOT)/$(if $(filter arm thumb,$(BACKEND)),armthumb,$(BACKEND))/mcerrs.h
 
 $(DERIVED_STAMP): $(DERIVED_SRCS) $(DERIVED_HDRS) | $(DERIVED_DIR)
 	@touch $@
@@ -401,8 +441,8 @@ GENHDRS_HOST  := $(HOSTTOOLS_DIR)/genhdrs
 PEEPGEN_HOST  := $(HOSTTOOLS_DIR)/$(BACKEND)/peepgen
 
 # per-tool bundles ----------------
-NCC_SRCS   := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(ARM_SRCS))
-NCPP_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CPPFE_SRCS) $(ARM_SRCS))
+NCC_SRCS   := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(BACKEND_SRCS_$(BACKEND)))
+NCPP_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CPPFE_SRCS) $(BACKEND_SRCS_$(BACKEND)))
 NTCC_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(THUMB_SRCS))
 NTCPP_SRCS := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CPPFE_SRCS) $(THUMB_SRCS))
 NMCC_SRCS  := $(addprefix ncc/,$(CC_COMMON_SRCS) $(CFE_SRCS)   $(MEOW_SRCS))
@@ -444,7 +484,7 @@ HEADERS_OBJ := $(OBJ_DIR)/headers.o
 
 #
 # top-level goals
-.PHONY: all ncc n++ ntcc nt++ nmcc interp clbcomp \
+.PHONY: all ncc n++ ntcc nt++ nmcc interp clbcomp runtime \
         arm_variants clean distclean print
 all: ncc n++
 
@@ -474,6 +514,22 @@ nt++:    $(BIN_NTCPP)
 nmcc:    $(BIN_NMCC)
 interp:  $(BIN_INTERP)
 clbcomp: $(BIN_CLBCOMP)
+
+# Runtime support library for Linux targets, built by the compiler itself.
+RUNTIME_SRCS_i386 := runtime/i386/llong.c
+RUNTIME_LIB       := $(LIB_DIR)/ncc-rt-$(TARGET).a
+RUNTIME_OBJS      := $(addprefix $(BUILD_DIR)/obj/runtime/$(TARGET)/, \
+                       $(notdir $(RUNTIME_SRCS_$(TARGET):.c=.o)))
+
+runtime: $(RUNTIME_LIB)
+
+$(RUNTIME_LIB): $(RUNTIME_OBJS)
+	$(RM) $@
+	ar rcs $@ $^
+
+$(BUILD_DIR)/obj/runtime/$(TARGET)/%.o: runtime/$(TARGET)/%.c $(BIN_NCC)
+	@mkdir -p $(@D)
+	$(BIN_NCC) -c $< -o $@
 
 print:
 	@echo "CC=$(CC)"

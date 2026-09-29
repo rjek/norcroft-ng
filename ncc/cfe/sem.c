@@ -33,6 +33,7 @@
 /* Nov 88: Rework optional double alignment, see TARGET_ALIGNS_DOUBLES. */
 
 #ifndef _SEM_H
+#include <stdio.h>                             /* for sprintf */
 #include <string.h>                            /* for memset and strcmp */
 #include "globals.h"
 #include "sem.h"
@@ -83,14 +84,16 @@
 /* #define'ing SIGNEDNESS_MATTERS can cause this not to happen.        */
 /* However, "char", "signed char" and "unsigned char" all differ.      */
 
-#define addrsignmap_ (TARGET_ADDRESSES_UNSIGNED ? \
+#define addrsignmap_ ((TARGET_ADDRESSES_UNSIGNED ? \
                         bitoftype_(s_int)|bitoftype_(s_unsigned) : \
-                        bitoftype_(s_int)|bitoftype_(s_signed))
+                        bitoftype_(s_int)|bitoftype_(s_signed)) | \
+                      (sizeof_ptr == 8 ? bitoftype_(s_long) : 0))
 
 /* The following macro is used to default the signedness for 'plain'   */
-/* char and 'plain' int bit fields.                                    */
+/* char and 'plain' int bit fields (C's _Bool bit fields are unsigned). */
 #define issignedchar_(m) ((m) & bitoftype_(s_signed) || \
-          (HasFeature(Feature_SignedChar) && !((m) & bitoftype_(s_unsigned))))
+          (HasFeature(Feature_SignedChar) && !((m) & bitoftype_(s_unsigned)) \
+           && !((m) & bitoftype_(s_bool) && !LanguageIsCPlusPlus)))
 
 Expr *errornode;
 
@@ -106,6 +109,10 @@ static Expr *mkassign(AEop op, Expr *a, Expr *b);
 static Expr *mkaddr(Expr *a);
 static Expr *mkincdec(AEop op, Expr *a);
 static Expr *bitfieldvalue(Expr *ebf, SET_BITMAP m, Expr *ewd);
+static Expr *mkcast_1(AEop op, Expr *e, TypeExpr *tr);
+static Expr *mkbinary_1(AEop op, Expr *a, Expr *b);
+static Expr *mkunary_1(AEop op, Expr *a);
+static Expr *mkcond_1(Expr *a, Expr *b, Expr *c);
 
 #define orig_(p)  arg1_(p)
 #define compl_(p) arg2_(p)
@@ -281,10 +288,13 @@ TypeExpr *unbitfield_type(TypeExpr *t)
 #ifdef ONE_DAY_SOON /* including C++? */
             return primtype2_(m & ~BITFIELD, typespectagbind_(t));
 #endif
-            return m & bitoftype_(s_enum) ?
+            return m & bitoftype_(s_enum) ||
+                   (m & bitoftype_(s_bool) && !LanguageIsCPlusPlus) ?
                      primtype2_(m & ~BITFIELD, typespectagbind_(t))
                    : int_islonglong_(m) ?
                      te_llint
+                   : int_is64bit_(m) ?
+                     te_lint
                    : te_int;
     }
     syserr(syserr_unbitfield, t);
@@ -415,11 +425,15 @@ TypeExpr *typeofexpr(Expr *x)
           } break;
 #endif
         case s_wstring:
+        case s_u16string:
+        case s_u32string:
           { int32 n = 0; StringSegList *p;
             for (p = exs_(x)->strseg; p != 0; p = p->strsegcdr)
                 n += p->strseglen;
-            t = mk_typeexpr1(t_subscript, te_wstringchar,
-                             mkintconst(te_int, n/sizeof_wchar + 1, 0));
+            t = mk_typeexpr1(t_subscript,
+                             h0_(x) == s_wstring ? te_wstringchar :
+                             h0_(x) == s_u32string ? te_uint : te_ushort,
+                             mkintconst(te_int, n/stringunit_(h0_(x)) + 1, 0));
           } break;
         case s_error:            /* @@@ remove soon? */
             t = te_int; break;   /* for sizeof() or sizeof(1.0%2.0) */
@@ -468,15 +482,23 @@ static int32 alignofclass(TagBinder *b)
     if (tagbindbits_(b) & TB_UNALIGNED)
         return 1;
 
-    /* Short circuit the code if it can never update 'n':         */
-    if (alignof_max > alignof_struct)
+    /* Short circuit the code if it can never update 'n' (as it     */
+    /* can with C11's _Alignas):                                    */
+    if (alignof_max > alignof_struct || CStd(STD_C11))
     {   ClassMember *l = tagbindmems_(b);
 /* This code should never be called when the struct/union is not defined, */
 /* but, even if it is no harm will occur as then l==0.  (!TB_DEFD)        */
 /* Note we can safely treat bit field members as non-bit field members.   */
         for (; l != 0; l = memcdr_(l))
             if (is_datamember_(l))
+            {
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                /* Unnamed bitfields don't affect a struct's alignment.   */
+                if (memsv_(l) == NULL && isbitfield_type(memtype_(l)))
+                    continue;
+#endif
                 n = max(n, alignoftype(memtype_(l)));
+            }
     }
     return n;
 }
@@ -505,6 +527,10 @@ case s_typespec:
         {
     case bitoftype_(s_typedefname):
             b = typespecbind_(x);
+            if (attributes_(b) & A_ALIGNAS)    /* see _Alignas             */
+            {   int32 a = alignoftype(bindtype_(b));
+                return bindaddr_(b) > a ? bindaddr_(b) : a;
+            }
             return alignoftype(bindtype_(b));
     case bitoftype_(s_char):
             return 1;
@@ -513,6 +539,8 @@ case s_typespec:
             if (m & bitoftype_(s_char)) return 1;
             /* drop through */
     case bitoftype_(s_bool):
+            if (!LanguageIsCPlusPlus) return 1;       /* C's _Bool          */
+            /* drop through */
     case bitoftype_(s_int):
             return int_decodealign_(m);
     case bitoftype_(s_double):
@@ -570,6 +598,8 @@ static int32 sizeofintegraltype(TypeExpr *x, SET_BITMAP m)
         if (m & bitoftype_(s_char)) break;
         /* drop through */
     case bitoftype_(s_bool):
+        if (!LanguageIsCPlusPlus) break;
+        /* drop through */
     case bitoftype_(s_int):
         return int_decodelength_(m);
     }
@@ -583,6 +613,38 @@ bool structfield(ClassMember *l, int32 sort, StructPos *p)
     p->padded = NO;
     if (!is_datamember_(l)) return NO;
     /*if (istypevar(te)) { p->woffset = 0; return YES; }*/
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+    if (isbitfield_type(te) && !HasFeature(Feature_ReverseBitfields))
+    {   /* As the System V ABIs (and pcc) have it, a bitfield is placed at */
+        /* the next bit (even after a non-bitfield member), unless it      */
+        /* would then cross a boundary of an object of its type, aligned   */
+        /* as that type is in a struct, when it starts at the next such    */
+        /* boundary.  A zero-width bitfield moves to the next boundary.    */
+        /* The field is described by the offset of the container that      */
+        /* accesses will load (an int, or for a 64-bit type the aligned     */
+        /* 64-bit object including the field if there is one, and          */
+        /* otherwise the aligned int) and its bit offset within that.      */
+        int32 k = membits_(l);
+        int32 size = 8 * sizeofintegraltype(te, typespecmap_(te));
+        int32 align = 8 * alignoftype(te);
+        int32 pos = 8*n + bitoff, unit;
+        if (k == 0 || (pos % align) + k > size)
+        {   int32 oldpos = pos;
+            pos = padsize(pos, align);
+            if (pos != oldpos) p->padded = YES;
+        }
+        unit = size > MAXBITSIZE && pos / size == (pos + k - 1) / size ?
+                   size : MAXBITSIZE;
+        p->woffset = (pos / unit) * (unit / 8);
+        p->boffset = pos - 8 * p->woffset;
+        p->bsize = k, p->typesize = 0;
+        if (sort != bitoftype_(s_union)) pos += k;
+        p->n = (pos / MAXBITSIZE) * (MAXBITSIZE / 8);
+        p->bitoff = pos - 8 * p->n;
+        p->endofcontainer = (pos + 7) / 8;      /* the last byte used     */
+        return YES;
+    }
+#endif
     if (isbitfield_type(te))
     {   /* Bitfields are packed into objects having the type of the member */
         /* (for enumerations, the type of the enumeration's container).    */
@@ -787,6 +849,9 @@ case s_typespec:
         case bitoftype_(s_int):
             if (m & BITFIELD)
                 cc_rerr(sem_rerr_sizeof_bitfield);
+            /* C's _Bool is a byte (C++'s bool, an int).                */
+            if ((m & -m) == bitoftype_(s_bool) && !LanguageIsCPlusPlus)
+                return 1;
             return int_decodelength_(m);
         case bitoftype_(s_double):
             return (m & bitoftype_(s_short)) ? sizeof_float :
@@ -1324,7 +1389,7 @@ case s_typespec:
         }
         break;
     }
-    cc_warn(sem_warn_format_type, t, (int)bufp, argindex, buf);
+    cc_warn(sem_warn_format_type, t, argindex, (int)bufp, buf);
 }
 
 #ifdef STRING_COMPRESSION
@@ -2081,6 +2146,38 @@ static Expr *MarkError(Expr *e, Expr *errorexpr, msg_t msg)
   return mk_expr3(s_evalerror, typeofexpr(e), e, errorexpr, (Expr *)msg);
 }
 
+/* A 64-bit integer constant of type t (with type bits m).  With 64-bit  */
+/* integer registers, one whose value is the sign extension of 32 bits  */
+/* is represented as an s_integer, as the rest of the compiler expects  */
+/* of (e.g.) array sizes and case labels, and as cg can use it as an    */
+/* immediate operand.                                                   */
+static Expr *mkint64result(TypeExpr *t, SET_BITMAP m, int64 const *v,
+                           Expr *orig)
+{
+#ifdef TARGET_HAS_64BIT_INTREGS
+    if ((v->hi == 0 && !(v->lo & 0x80000000)) ||
+        (v->hi == -1 && (v->lo & 0x80000000)))
+        return mkintconst(t, (int32)v->lo, orig);
+#else
+    IGNORE(t); IGNORE(orig);
+#endif
+    return (Expr *)mkint64const(m, v);
+}
+
+/* The 64-bit value of an unsigned s_integer: with 64-bit integer        */
+/* registers, one of a 64-bit type is sign extended (see mkint64result). */
+static void int64_of_integer(uint64 *v, Expr *e)
+{
+#ifdef TARGET_HAS_64BIT_INTREGS
+    TypeExpr *t = princtype(type_(e));
+    if (h0_(t) == s_typespec && int_is64bit_(typespecmap_(t)))
+    {   I64_IToS((int64 *)v, intval_(e));
+        return;
+    }
+#endif
+    I64_IToU(v, intval_(e));
+}
+
 static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
 { AEop op = h0_(c);
   Expr *a = arg1_(c), *b = arg2_(c);
@@ -2169,7 +2266,8 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
                        errorexpr, errormsg);
 
 
-  if (h0_(a) == s_integer && h0_(b) == s_integer &&
+  /* 32-bit arithmetic, unless the type is 64 bits (then see below).    */
+  if (h0_(a) == s_integer && h0_(b) == s_integer && !int_is64bit_(flag) &&
                              (flag & bitoftype_(s_unsigned)))
   { unsigned32 m = intval_(a), n = intval_(b), r;
     bool ok = YES;
@@ -2215,7 +2313,7 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
                      errorexpr, errormsg);
   }
 
-  if (h0_(a) == s_integer && h0_(b) == s_integer)
+  if (h0_(a) == s_integer && h0_(b) == s_integer && !int_is64bit_(flag))
   { int32 m = intval_(a), n = intval_(b), r;
     bool ok = YES;
 /* @@@ The next lines assume that host 'int' overflow wraps round silently.  */
@@ -2278,11 +2376,11 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
     I64_Status ok = i64_ok;
     uint32 n;
     if (h0_(a) == s_integer)
-      I64_IToU(&av, intval_(a));
+      int64_of_integer(&av, a);
     else
       av = int64val_(a).u;
     if (h0_(b) == s_integer)
-      I64_IToU(&bv, intval_(b));
+      int64_of_integer(&bv, b);
     else
       bv = int64val_(b).u;
     switch (op)
@@ -2311,7 +2409,7 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
     {   errormsg = sem_errwarn_udiad_overflow;
         errorexpr = c;
     }
-    return MarkError((Expr *)mkint64const(flag, (int64 *)&rv),
+    return MarkError(mkint64result(type_(c), flag, (int64 *)&rv, c),
                      errorexpr, errormsg);
   }
 
@@ -2354,7 +2452,7 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
     {   errormsg = sem_errwarn_diad_overflow;
         errorexpr = c;
     }
-    return MarkError((Expr *)mkint64const(flag, &rv),
+    return MarkError(mkint64result(type_(c), flag, &rv, c),
                      errorexpr, errormsg);
   }
 
@@ -2411,6 +2509,7 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
                          errorexpr, errormsg);
     }
   }
+#ifndef TARGET_HAS_64BIT_INTREGS     /* else long long is done in-line */
   if ((flag & bitoftype_(s_int)) && int_islonglong_(flag)) {
     Expr *fname, *revfname;
     if (flag & bitoftype_(s_unsigned))
@@ -2460,9 +2559,16 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
       Expr *e = a;
       a = b; b = e; fname = revfname;
     }
-    return MarkError(mk1fnap(fname, mkExprList2(a, b)),
-                     errorexpr, errormsg);
+    { Expr *r = mk1fnap(fname, mkExprList2(a, b));
+#ifdef TARGET_IS_X86    /* (Arm has the bug, but its output is frozen.) */
+      /* The helpers return long long: give the call the type of the     */
+      /* op, so that (e.g.) its unsigned result is shifted as unsigned. */
+      if (h0_(r) == s_fnap && !isrelational_(op)) type_(r) = type_(c);
+#endif
+      return MarkError(r, errorexpr, errormsg);
+    }
   }
+#endif
   { Expr *fname = NULL, *revfname = NULL;
     if (software_floats_enabled && is_float_(flag))
       switch(op)
@@ -2572,7 +2678,7 @@ static Expr *trymonadreduce(AEop op, Expr *a, Expr *c, SET_BITMAP flag)
             ? sem_errwarn_umonad_overflow
             : sem_errwarn_monad_overflow;
     }
-    return MarkError((Expr *)mkint64const(flag, &rv),
+    return MarkError(mkint64result(type_(c), flag, &rv, c),
                      errorexpr, errormsg);
   }
 
@@ -2595,6 +2701,7 @@ static Expr *trymonadreduce(AEop op, Expr *a, Expr *c, SET_BITMAP flag)
                          errorexpr, errormsg);
     }
   }
+#ifndef TARGET_HAS_64BIT_INTREGS     /* else long long is done in-line */
   if ((flag & ts_longlong) == ts_longlong) {
     TypeExpr *t = princtype(typeofexpr(a));     /* hmm */
     SET_BITMAP m = h0_(t)==s_typespec ? typespecmap_(t) : 0;
@@ -2611,6 +2718,7 @@ static Expr *trymonadreduce(AEop op, Expr *a, Expr *c, SET_BITMAP flag)
                        errorexpr, errormsg);
     }
   }
+#endif
   { TypeExpr *t = princtype(typeofexpr(a));     /* hmm */
     SET_BITMAP m = h0_(t)==s_typespec ? typespecmap_(t) : 0;
     Expr *fname = NULL;
@@ -2649,7 +2757,11 @@ static Expr *castfn(Expr *e)
     m1 = typespecmap_(t1);
     if (m1 & bitoftype_(s_void)) return e; /* cast to void: leave alone  */
     m2 = typespecmap_(t2);
+#ifdef TARGET_HAS_64BIT_INTREGS
+    if (0) {                        /* long long conversions are in-line */
+#else
     if (int_islonglong_(m1)) {
+#endif
         if (m2 & bitoftype_(s_double)) {
             fname = (m1 & bitoftype_(s_unsigned))
                 ? ((m2 & bitoftype_(s_short)) ? sim.llufromf : sim.llufromd)
@@ -2664,6 +2776,7 @@ static Expr *castfn(Expr *e)
         } else
             fname = (m2 & bitoftype_(s_unsigned)) ? sim.llfromu : sim.llfroml;
 
+#ifndef TARGET_HAS_64BIT_INTREGS
     } else if (int_islonglong_(m2)) {
         if (m1 & bitoftype_(s_double))
             fname = (m2 & bitoftype_(s_unsigned))
@@ -2671,6 +2784,7 @@ static Expr *castfn(Expr *e)
                 : ((m1 & bitoftype_(s_short)) ? sim.llstof : sim.llstod);
         else
             return mkcast(s_cast, mk1fnap(sim.lltol, mkExprList1(a)), t1);
+#endif
 
     } else if (is_float_(m1)) {
         if (is_float_(m2))
@@ -2691,7 +2805,14 @@ static Expr *castfn(Expr *e)
         else if (software_doubles_enabled)
             fname = (m2 & bitoftype_(s_unsigned)) ? sim.dfloatu : sim.dfloat;
     }
-    if (fname != NULL) return mk1fnap(fname, mkExprList1(a));
+    if (fname != NULL)
+    {   Expr *r = mk1fnap(fname, mkExprList1(a));
+#ifdef TARGET_IS_X86    /* (as in trydiadreduce())                  */
+        /* (e.g. _ll_from_l returns long long, maybe cast to unsigned)   */
+        if (int_islonglong_(m1)) type_(r) = type_(e);
+#endif
+        return r;
+    }
 
     if (software_floats_enabled && is_float_(m2))
         fname = (m1 & bitoftype_(s_unsigned)) ? sim.ffixu : sim.ffix;
@@ -2707,6 +2828,31 @@ static Expr *castfn(Expr *e)
     return e;
 }
 
+/* Truncate d to a 64-bit integer (unsigned if uns), returning NO if it */
+/* is out of range.                                                     */
+static bool dbl_to_int64(int64 *res, DbleBin const *d, bool uns)
+{   uint32 hi = d->msd;
+    int32 bexp = (int32)((hi >> 20) & 0x7ff), shift = bexp - 1075;
+    bool neg = (hi & 0x80000000) != 0;
+    uint64 v;
+    if (bexp == 0x7ff) return NO;                   /* infinity or NaN  */
+    v.hi = (hi & 0xfffff) | 0x100000, v.lo = d->lsd;
+    if (bexp == 0 || shift <= -53)
+        v.hi = v.lo = 0;                            /* |d| < 1          */
+    else if (shift < 0)
+        (void)I64_URsh(&v, &v, (Uint)-shift);
+    else if (shift <= 11)                           /* 53 + 11 = 64     */
+        (void)I64_Lsh((int64 *)&v, (int64 *)&v, (Uint)shift);
+    else
+        return NO;
+    if (uns ? neg && (v.hi | v.lo) != 0 :
+              v.hi > 0x80000000 || (v.hi == 0x80000000 && (!neg || v.lo != 0)))
+        return NO;
+    if (neg) (void)I64_Neg((int64 *)&v, (int64 *)&v);
+    res->hi = (int32)v.hi, res->lo = v.lo;
+    return YES;
+}
+
 static Expr *trycastreduce(Expr *a, TypeExpr *tc, Expr *c, bool explicit)
 /* Args somewhat redundant -- c = (s_cast,tc,a)                       */
 { TypeExpr *x = princtype(tc);          /* type being cast to.        */
@@ -2716,7 +2862,9 @@ static Expr *trycastreduce(Expr *a, TypeExpr *tc, Expr *c, bool explicit)
     unsigned32 n, r;
     SET_BITMAP m, ta;
     if (h0_(a) == s_integer) {
-      ta = typespecmap_(princtype(type_(a)));
+      TypeExpr *t = princtype(type_(a));
+      /* (A null pointer constant, or a pointer made from an integer.)  */
+      ta = h0_(t) == s_typespec ? typespecmap_(t) : addrsignmap_;
       n = intval_(a);
     } else {
       ta = int64map_(a);
@@ -2733,19 +2881,26 @@ case s_typespec:
             r = (issignedchar_(m) && (n & 0x80))
                 ? (n | ~(int32)0xff) : (n & 0xff);
             break;
+    case bitoftype_(s_bool):
+            if (LanguageIsCPlusPlus) return c;
+            r = n = (n != 0 || truncated);
+            truncated = NO;
+            break;
     case bitoftype_(s_enum):    /* ansi C says treat like 'int'.        */
     case bitoftype_(s_int):
-            if (int_islonglong_(m)) {
+            if (int_is64bit_(m)) {
                 if (h0_(a) == s_int64con) {
-                    return (Expr *)mkint64const(m, &int64val_(a).i);
-                } else if (ta & bitoftype_(s_unsigned)) {
+                    return mkint64result(tc, m, &int64val_(a).i, c);
+                } else if ((ta & bitoftype_(s_unsigned)) && !int_is64bit_(ta)) {
+                    /* (A 64-bit s_integer is sign extended, even if    */
+                    /* unsigned.)                                       */
                     uint64 u;
                     I64_IToU(&u, n);
-                    return (Expr *)mkint64const(m, (int64 *)&u);
+                    return mkint64result(tc, m, (int64 *)&u, c);
                 } else {
                     int64 i;
                     I64_IToS(&i, n);
-                    return (Expr *)mkint64const(m, &i);
+                    return mkint64result(tc, m, &i, c);
                 }
             }
             if ((int_isshort_(m) ? sizeof_short :
@@ -2760,12 +2915,22 @@ case s_typespec:
             /* remember (double)(-1u) != (double)(-1) ... */
 /* Use int_to_real() rather than flt_itod() or flt_utod() since it fills */
 /* in a string with the number etc etc etc.                              */
-            if (h0_(a) == s_int64con)
-                return mkinvisible(tc, c, (Expr *)int64_to_real(
-                    &int64val_(a).i, ta & bitoftype_(s_unsigned), m));
-            if (ta & ARITHTYPEBITS)
+            if (ta & ARITHTYPEBITS) {
+                if (h0_(a) == s_int64con)
+                    return mkinvisible(tc, c, (Expr *)int64_to_real(
+                        &int64val_(a).i, ta & bitoftype_(s_unsigned), m));
+#ifdef TARGET_HAS_64BIT_INTREGS
+                if (int_is64bit_(ta)) {
+                    /* the s_integer is the sign extension of n         */
+                    int64 v;
+                    I64_IToS(&v, n);
+                    return mkinvisible(tc, c, (Expr *)int64_to_real(
+                        &v, ta & bitoftype_(s_unsigned), m));
+                }
+#endif
                 return mkinvisible(tc, c, (Expr *)int_to_real(
                     n, ta & bitoftype_(s_unsigned), m));
+            }
             /* drop through */
             default: return c;     /* always harmless to return cast */
         }
@@ -2802,12 +2967,19 @@ omit_check:
                     ? (n | ~(int32)0xff) : (n & 0xff);
                 break;
             case bitoftype_(s_int):
-                if (int_islonglong_(m)) {
-                    int64 v;
-                    status = (m & bitoftype_(s_unsigned)) ? flt_dtoull((uint64 *)&v, &d)
-                                                          : flt_dtoll(&v, &d);
-                    if (status > flt_ok) cc_warn(sem_warn_fix_fail);
-                    return (Expr *)mkint64const(m, &v);
+#ifdef TARGET_HAS_64BIT_INTREGS
+                if (int_is64bit_(m))
+                {   int64 v;
+                    if (!dbl_to_int64(&v, &d, (m & bitoftype_(s_unsigned)) != 0))
+                        return c;       /* leave it to run time          */
+                    return mkint64result(tc, m, &v, c);
+                }
+#endif
+                if (int_islonglong_(m))
+                {   int64 v;         /* long long on a 32-bit target */
+                    if (!dbl_to_int64(&v, &d, (m & bitoftype_(s_unsigned)) != 0))
+                        return c;
+                    return mkint64result(tc, m, &v, c);
                 }
                 status = (m & bitoftype_(s_unsigned)) ? flt_dtou((unsigned32 *)&n, &d)
                                                       : flt_dtoi(&n, &d);
@@ -2863,6 +3035,9 @@ static void check_index_overflow(Expr *ptr, Expr *disp, int posneg,
                 int32 k = sizeoftype(typearg_(princtype(t0)));
                 int32 n = posneg * intval_(disp);
                 if (bound && h0_(bound) == s_binder) bound = NULL;
+                /* (A zero bound is a C99 flexible array member's.)     */
+                if (bound && CStd(STD_C99) && evaluate(bound) == 0)
+                    bound = NULL;
                 if (k == 0) k = 1; /* paranoia */
                 if (!deref)
                 {   /* always whinge for n<0 or n>limit...              */
@@ -3000,7 +3175,7 @@ retry:  switch h0_(e)
 static int32 bf_container_bits(TypeExpr *t)
 {   SET_BITMAP m = typespecmap_(t);
     if (m & bitoftype_(s_char))  return 8;
-    if (int_islonglong_(m)) return 8 * sizeof_longlong;
+    if (int_is64bit_(m)) return 64;
 #ifdef TARGET_LACKS_HALFWORD_STORE
     if (target_lacks_halfword_store) return MAXBITSIZE;
 #endif
@@ -3015,7 +3190,8 @@ static Expr *bf_container(Expr *e, SET_BITMAP m)
     {   int32 maxsize = bf_container_bits(type_(e));
         if (maxsize >= MAXBITSIZE)
             return mk_exprwdot(s_dot,
-                           mkqualifiedtype(int_islonglong_(m) ? te_llint : te_int,
+                           mkqualifiedtype(int_islonglong_(m) ? te_llint :
+                                           int_is64bit_(m) ? te_lint : te_int,
                                            m & QUALIFIER_MASK),
                            arg1_(e), exprdotoff_(e));
         else {
@@ -3082,7 +3258,7 @@ static Expr *coerceunary_2(Expr *e, enum Coerce_Context c)
     /* Here is just the place to check that "a[n]" is (in)valid given   */
     /* the declaration "int a[n]".                                      */
     check_index_dereference(e);
-    if (LanguageIsCPlusPlus)
+    if (LanguageIsCPlusPlus || CStd(STD_C23))       /* (C23's constexpr) */
     {
         if (h0_(e) == s_binder && bindconst_(exb_(e)))
             e = mkinvisible(qt, e, bindconst_(exb_(e)));
@@ -3433,8 +3609,257 @@ static Expr *appendlet(Expr *let, Expr *e)
     return mk_exprlet(s_let, te, exprletbind_(let), e);
 }
 
+/* C23's _BitInt(N), for N up to BITINT_MAXWIDTH, is a typedef of the   */
+/* smallest standard integer type that holds N bits (its container),    */
+/* marked A_BITINT with N as its bindaddr_.  So it has the size and     */
+/* alignment of its container, and the rest of the compiler sees only   */
+/* the container.  Its values are kept in range by wrapping them (see   */
+/* bitint_wrap()) whenever something is converted to it, and the        */
+/* results of arithmetic on it are converted to it (see mkbinary()).    */
+
+static Binder *bitint_binders[2][BITINT_MAXWIDTH+1];
+
+TypeExpr *bitint_type(int32 n, bool isunsigned)
+{   Binder *b = bitint_binders[isunsigned != 0][n];
+    if (b == NULL)
+    {   char name[32];
+        SET_BITMAP m = n <= 8 ? bitoftype_(s_char) :
+                       n <= 16 ? ts_short :
+                       n <= 32 ? ts_int : ts_longlong;
+        m |= isunsigned ? bitoftype_(s_unsigned) : bitoftype_(s_signed);
+        sprintf(name, "%s_BitInt(%ld)", isunsigned ? "unsigned " : "",
+                (long)n);
+        b = global_mk_binder(0, sym_insert_id(name), bitofstg_(s_typedef),
+                             globalize_typeexpr(primtype_(m)));
+        attributes_(b) |= A_BITINT;
+        bindaddr_(b) = n;
+        bitint_binders[isunsigned != 0][n] = b;
+    }
+    return primtype2_(bitoftype_(s_typedefname), b);
+}
+
+/* The width of t if it is a _BitInt type, else 0.                      */
+int32 bitint_width(TypeExpr *t)
+{   while (h0_(t) == s_typespec &&
+           (typespecmap_(t) & bitoftype_(s_typedefname)))
+    {   Binder *b = typespecbind_(t);
+        if (attributes_(b) & A_BITINT) return bindaddr_(b);
+        t = bindtype_(b);
+    }
+    return 0;
+}
+
+/* The width of integer type t, and whether it is unsigned, or 0 if t   */
+/* is not an integer type.                                              */
+static int32 int_width(TypeExpr *t, bool *isunsigned)
+{   int32 n = bitint_width(t);
+    SET_BITMAP m;
+    t = princtype(t);
+    if (h0_(t) != s_typespec) return 0;
+    m = typespecmap_(t);
+    *isunsigned = (m & bitoftype_(s_unsigned)) != 0;
+    if (n != 0) return n;
+    switch (m & -m)
+    {   case bitoftype_(s_bool):
+            *isunsigned = YES;
+            return 1;
+        case bitoftype_(s_char):
+            *isunsigned = !issignedchar_(m);
+            return 8;
+        case bitoftype_(s_enum):
+            return 8*sizeof_int;
+        case bitoftype_(s_int):
+            return 8*int_decodelength_(m);
+        default:
+            return 0;
+    }
+}
+
+/* Constant e wrapped into the range of a _BitInt of width n (< 64).    */
+static Expr *bitint_wrap_constant(Expr *e, int32 n, bool isunsigned)
+{   uint64 v;
+    uint32 *p, bit, mask;
+    if (h0_(e) == s_int64con)
+        v = int64val_(e).u;
+    else
+    {   TypeExpr *t = princtype(type_(e));
+        SET_BITMAP m = h0_(t) == s_typespec ? typespecmap_(t) : 0;
+        if ((m & bitoftype_(s_unsigned)) && !int_is64bit_(m))
+            I64_IToU(&v, intval_(e));
+        else
+            I64_IToS((int64 *)&v, intval_(e));
+    }
+    /* The top word of the result, from bit n-1 up, is all copies of    */
+    /* the sign bit (or zeros).                                          */
+    p = n > 32 ? &v.hi : &v.lo;
+    bit = (uint32)1 << ((n - 1) & 31);
+    mask = bit | (bit - 1);
+    if (!isunsigned && (*p & bit)) *p |= ~mask; else *p &= mask;
+    if (n <= 32)
+        return mkintconst(isunsigned ? te_uint : te_int, (int32)v.lo, 0);
+    return mkint64result(isunsigned ? te_ullint : te_llint,
+                         ts_longlong | (isunsigned ? bitoftype_(s_unsigned) : 0),
+                         (int64 *)&v, 0);
+}
+
+/* e, converted to the standard type that holds _BitInt type tr of      */
+/* width n, and wrapped into its range.  (e is returned as it is if it  */
+/* is in range already, or not arithmetic.)                             */
+static Expr *bitint_wrap(Expr *e, TypeExpr *tr, int32 n)
+{   TypeExpr *te = typeofexpr(e);
+    bool us, ut = (typespecmap_(princtype(tr)) & bitoftype_(s_unsigned)) != 0;
+    int32 ws = int_width(te, &us), w = n <= 32 ? 32 : 64, k = w - n;
+    if (ws == 0)
+    {   te = princtype(te);
+        if (!(h0_(te) == s_typespec &&
+              (typespecmap_(te) & bitoftype_(s_double))))
+            return e;
+        e = mkcast_1(s_cast, e, w == 32 ? te_int : te_llint);
+    }
+    else if (us == ut ? ws <= n : (us && ws < n))
+        return e;
+    if (n == 8 || n == 16 || n == 32 || n == 64)
+        return e;                       /* as for its container         */
+    if (h0_(e) == s_integer || h0_(e) == s_int64con)
+        return bitint_wrap_constant(e, n, ut);
+    e = mkcast_1(s_cast, e, w == 32 ? te_uint : te_ullint);
+    if (ut && n < 32)
+        return mkbinary_1(s_and, e, mkintconst(te_uint, (1L << n) - 1, 0));
+    e = mkbinary_1(s_leftshift, e, mkintconst(te_int, k, 0));
+    if (!ut) e = mkcast_1(s_cast, e, w == 32 ? te_int : te_llint);
+    return mkbinary_1(s_rightshift, e, mkintconst(te_int, k, 0));
+}
+
+/* The type that integer type t (of width w) is promoted to.            */
+static TypeExpr *promoted_int_type(TypeExpr *t, int32 w, bool isunsigned)
+{   t = princtype(t);
+    if (w < 8*sizeof_int) return te_int;
+    if (isbitfield_type(t) || (typespecmap_(t) & bitoftype_(s_enum)))
+        return isunsigned ? te_uint : te_int;
+    return primtype_(typespecmap_(t) & ~CVBITS);
+}
+
+/* The _BitInt type of the result of a op b, or NULL if the result      */
+/* isn't one.  For a relational op, it is the type that both operands   */
+/* are converted to.  If it is NULL, *tstd is the standard type that    */
+/* the operand which is a _BitInt must first be converted to (as its    */
+/* container may have a different rank or signedness), or NULL if op   */
+/* is as usual.                                                         */
+static TypeExpr *bitint_optype(AEop op, Expr *a, Expr *b, TypeExpr **tstd)
+{   TypeExpr *ta, *tb;
+    int32 na, nb, wa, wb;
+    bool ua, ub;
+    *tstd = NULL;
+    switch (op)
+    {   case s_plus: case s_minus: case s_times: case s_div: case s_rem:
+        case s_and: case s_or: case s_xor:
+        case s_leftshift: case s_rightshift:
+            break;
+        default:
+            if (!isrelational_(op)) return NULL;
+    }
+    if (h0_(a) == s_error || h0_(b) == s_error) return NULL;
+    ta = typeofexpr(a), tb = typeofexpr(b);
+    na = bitint_width(ta), nb = bitint_width(tb);
+    if (na == 0 && nb == 0) return NULL;
+    wa = int_width(ta, &ua), wb = int_width(tb, &ub);
+    if (wa == 0 || wb == 0) return NULL;        /* as usual             */
+    if (op == s_leftshift || op == s_rightshift)
+        return na == 0 ? NULL : bitint_type(na, ua);
+    if (na != 0 && nb != 0)
+        return na > nb ? bitint_type(na, ua) :
+               nb > na ? bitint_type(nb, ub) : bitint_type(na, ua || ub);
+    /* A standard type has a greater rank than a _BitInt of the same    */
+    /* width, and is promoted to at least int.                          */
+    if (na != 0)
+    {   TypeExpr *t = promoted_int_type(tb, wb, ub);
+        if (wb < 8*sizeof_int) wb = 8*sizeof_int, ub = NO;
+        if (wb < na) return bitint_type(na, ua);
+        if (wb == na && ua && !ub)
+            t = primtype_(typespecmap_(t) | bitoftype_(s_unsigned));
+        *tstd = t;
+    }
+    else
+    {   TypeExpr *t = promoted_int_type(ta, wa, ua);
+        if (wa < 8*sizeof_int) wa = 8*sizeof_int, ua = NO;
+        if (wa < nb) return bitint_type(nb, ub);
+        if (wa == nb && ub && !ua)
+            t = primtype_(typespecmap_(t) | bitoftype_(s_unsigned));
+        *tstd = t;
+    }
+    return NULL;
+}
+
+/* a, converted to tstd if it is a _BitInt (see bitint_optype()).       */
+static Expr *bitint_tostd(Expr *a, TypeExpr *tstd)
+{   return tstd != NULL && h0_(a) != s_error &&
+           bitint_width(typeofexpr(a)) != 0 ? mkcast(s_cast, a, tstd) : a;
+}
+
+/* r, known to be in range for _BitInt type t, as a t.                  */
+static Expr *bitint_retype(Expr *r, TypeExpr *t)
+{   return h0_(r) == s_error ? r : mkcast_1(s_cast, r, t);
+}
+
+Expr *mkcast(AEop op, Expr *e, TypeExpr *tr)
+{   int32 n;
+    if (h0_(e) != s_error && (n = bitint_width(tr)) != 0)
+    {   e = mkcast_1(op, bitint_wrap(e, tr, n), tr);
+        /* (A 64-bit constant can't hold the typedef.)                  */
+        if (h0_(e) == s_int64con) e = mk_expr1(s_cast, tr, e);
+        return e;
+    }
+    return mkcast_1(op, e, tr);
+}
+
+Expr *mkbinary(AEop op, Expr *a, Expr *b)
+{   TypeExpr *tstd, *t = bitint_optype(op, a, b, &tstd);
+    Expr *r;
+    bool isunsigned;
+    if (t == NULL)
+        return mkbinary_1(op, bitint_tostd(a, tstd), bitint_tostd(b, tstd));
+    if (op != s_leftshift && op != s_rightshift)
+    {   a = mkcast(s_cast, a, t);
+        b = mkcast(s_cast, b, t);
+    }
+    r = mkbinary_1(op, a, b);
+    if (isrelational_(op)) return r;
+    (void)int_width(t, &isunsigned);
+    switch (op)
+    {   case s_and: case s_or: case s_xor: case s_rightshift:
+            return bitint_retype(r, t);
+        case s_div: case s_rem:
+            if (isunsigned) return bitint_retype(r, t);
+    }
+    return h0_(r) == s_error ? r : mkcast(s_cast, r, t);
+}
 
 Expr *mkunary(AEop op, Expr *a)
+{   TypeExpr *t;
+    int32 n;
+    Expr *r;
+    bool isunsigned;
+    if (!(op == s_neg || op == s_bitnot || op == s_monplus) ||
+        h0_(a) == s_error || (n = bitint_width(t = typeofexpr(a))) == 0)
+        return mkunary_1(op, a);
+    (void)int_width(t, &isunsigned);
+    t = bitint_type(n, isunsigned);
+    r = mkunary_1(op, a);
+    if (h0_(r) == s_error) return r;
+    return op == s_monplus || (op == s_bitnot && !isunsigned) ?
+               bitint_retype(r, t) : mkcast(s_cast, r, t);
+}
+
+Expr *mkcond(Expr *a, Expr *b, Expr *c)
+{   TypeExpr *tstd, *t = bitint_optype(s_plus, b, c, &tstd);
+    Expr *r;
+    if (t == NULL)
+        return mkcond_1(a, bitint_tostd(b, tstd), bitint_tostd(c, tstd));
+    r = mkcond_1(a, mkcast(s_cast, b, t), mkcast(s_cast, c, t));
+    return bitint_retype(r, t);
+}
+
+static Expr *mkunary_1(AEop op, Expr *a)
 {   Expr *c;
     TypeExpr *t;
     if (monadneedslvalue_(op))    /* & ++ -- */
@@ -3517,7 +3942,7 @@ static Expr *OtherBitsMask(int32 size, int32 maxsize, int32 lspos) {
         I64_LSBMask(&n, size);
         I64_Lsh(&n, &n, lspos);
         I64_Not(&n, &n);
-        return (Expr *)mkint64const(ts_longlong, &n);
+        return mkint64result(te_llint, ts_longlong, &n, 0);
     }
 }
 
@@ -3527,7 +3952,7 @@ static Expr *LSBMask(int32 size, int32 maxsize) {
     else {
         int64 n;
         I64_LSBMask(&n, size);
-        return (Expr *)mkint64const(ts_longlong, &n);
+        return mkint64result(te_llint, ts_longlong, &n, 0);
     }
 }
 
@@ -3546,14 +3971,14 @@ static Expr *bitfieldvalue(Expr *ebf, SET_BITMAP m, Expr *ewd)
     int32 size = exprbsize_(ebf);
     int32 maxsize = bf_container_bits(type_(ebf));
     TypeExpr *tr = bf_promotedtype(type_(ebf), size);
-    int32 maxbitsize = int_islonglong_(m) ? sizeof_longlong*8 : sizeof_int*8;
+    int32 maxbitsize = int_is64bit_(m) ? 64 : sizeof_int*8;
 /* AM @@@ There is work to be done (e.g. in the next line) so that we   */
 /* choose signed/unsigned enum bit fields depending on set of values?   */
 /* Currently enum bit fields act as plain int (i.e. may/maynot extend). */
     Expr *e;
     if (issignedchar_(m)) {
         e = mkshift(s_rightshift,
-              mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + ((sizeof_int / (maxsize/8)) - 1) * maxsize),
+              mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + (maxbitsize / maxsize - 1) * maxsize),
               maxbitsize-size);
     } else if
 #ifdef TARGET_HAS_SCALED_OPS
@@ -3569,13 +3994,13 @@ static Expr *bitfieldvalue(Expr *ebf, SET_BITMAP m, Expr *ewd)
 #endif
     {   if ((exprmsboff_(ebf) % maxsize) == 0) {
             e = mkshift(s_rightshift,
-                  mkcast(s_cast, ewd, int_islonglong_(m) ? te_ullint : te_uint),
+                  mkcast(s_cast, ewd, int_is64bit_(m) ? te_ullint : te_uint),
                   maxsize-size);
         } else {
             e = mkshift(s_rightshift,
                   mkcast(s_cast,
                     mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + (maxbitsize / maxsize - 1) * maxsize),
-                    int_islonglong_(m) ? te_ullint : te_uint),
+                    int_is64bit_(m) ? te_ullint : te_uint),
                   maxbitsize-size);
         }
     } else if (size == maxsize) {
@@ -3615,7 +4040,7 @@ static Expr *bitfieldstuff(AEop op, Expr *a, SET_BITMAP m,
                      bitfieldvalue(a, m, ewd),
                      b);
     return bitfieldinsert(op == s_postinc ? s_displace : s_assign,
-                          a, ewd, mkcast(op, bb, int_islonglong_(m) ? te_llint : te_int));
+                          a, ewd, mkcast(op, bb, int_is64bit_(m) ? te_llint : te_int));
 }
 
 static Expr *bitfieldassign(AEop op, Expr *a, TypeExpr *ta, Expr *b)
@@ -3633,14 +4058,45 @@ static Expr *bitfieldassign(AEop op, Expr *a, TypeExpr *ta, Expr *b)
     }
     m = typespecmap_(ta);
     bitword = bf_container(a, m);
+#ifndef TARGET_HAS_64BIT_INTREGS
+    /* The old value of a long long container from s_displace can't be  */
+    /* taken apart, as the calls of _ll_and() etc which would do so     */
+    /* need its address, so x.f++ is done as (t = x.f, x.f = t+1, t).   */
+    if (op == s_postinc && int_islonglong_(m))
+    {   Binder *gen = NULL, *old;
+        Expr *bw = bitword, *v;
+        if (!issimplelvalue(a))
+        {   gen = gentempbinder(ptrtotype_(typeofexpr(bitword)));
+            bw = mkunary(s_content, (Expr *)gen);
+        }
+        v = bitfieldvalue(a, m, bw);
+        if (h0_(v) == s_error) return errornode;
+        old = gentempbinder(type_(v));
+        r = mklet(old, type_(v),
+              mkbinary(s_comma,
+                mkbinary(s_assign, (Expr *)old, v),
+                mkbinary(s_comma,
+                  bitfieldstuff(s_assign, a, m, bw,
+                                mkbinary(s_plus, (Expr *)old, b)),
+                  (Expr *)old)));
+        if (gen != NULL)
+            r = mklet(gen, type_(v),
+                  mkbinary(s_comma,
+                    mkbinary(s_assign, (Expr *)gen, mkunary(s_addrof, bitword)),
+                    r));
+        if (h0_(r) == s_error) return errornode;
+        return mkinvisible(type_(r), mk_expr2(op, ta, a, b), r);
+    }
+#endif
 /* @@@ AM: the expression (x.b = 1) where x.b has bitfield type here    */
 /* has promoted type of x.b, maybe it shouldn't (e.g. sizeof).          */
     if (issimplelvalue(a))
         r = bitfieldvalue(a, m, bitfieldstuff(op, a, m, bitword, b));
     else
     {   Binder *gen = gentempbinder(ptrtotype_(typeofexpr(bitword)));
+        /* (The value is the container, which may be 64 bits.)          */
         r = bitfieldvalue(a, m,
-            mklet(gen, te_int,
+            mklet(gen, int_is64bit_(m) ? typeofexpr(bitword) : te_int,
                 mkbinary(s_comma,
                     mkbinary(s_assign, (Expr *)gen, mkunary(s_addrof,bitword)),
                     bitfieldstuff(op, a, m,
@@ -3953,7 +4409,7 @@ static Expr *mkindex(Expr *e, int32 stride, Expr *array, int posneg)
 }
 
 
-Expr *mkbinary(AEop op, Expr *a, Expr *b)
+static Expr *mkbinary_1(AEop op, Expr *a, Expr *b)
 {   TypeExpr *t1,*t2,*t3;
     if (op == s_init)           /* merge with diadneedslvalue below?    */
     {   Expr *c = mkassign(s_init, a, b);
@@ -4082,14 +4538,14 @@ clash:      typeclash(op);
                     /* which is only serves to stop check_narrow_subterm */
                     /* from issuing spurious warnings on                 */
                     /*         long x = offsetof(..)                     */
-                    Expr *actual = mk_expr2(s_ptrdiff, te_int, a, b);
-                    Expr *r = mk_expr2_ptr(op, te_int, a, b);
+                    Expr *actual = mk_expr2(s_ptrdiff, te_ptrdiff_t, a, b);
+                    Expr *r = mk_expr2_ptr(op, te_ptrdiff_t, a, b);
                     int32 sizeof_t3 = sizeoftype(t3);
                     /* the following helps the offsetof() macro used in */
                     /* static initialisers...                           */
                     if (sizeof_t3 != 1)
                         r = mkbinary(s_div, r,
-                                    mkintconst(te_int, sizeof_t3, 0));
+                                    mkintconst(te_ptrdiff_t, sizeof_t3, 0));
                     if (sizeof_ptr != sizeof_int &&
                         sizeof_ptr != sizeof_longlong)
                         /* Fix this more seriously one day?             */
@@ -4097,7 +4553,7 @@ clash:      typeclash(op);
                         syserr(syserr_ptrdiff);
                     if (h0_(r) == s_error) return errornode;
                     /* The invisible node is for correct error msgs */
-                    return mkinvisible(te_int, actual, r);
+                    return mkinvisible(te_ptrdiff_t, actual, r);
                 }
             }
             break;
@@ -4455,7 +4911,7 @@ static void check_narrowing_cast(AEop op, SET_BITMAP from, SET_BITMAP to)
 }
 
 /* tidy up relationship with coerce2() */
-Expr *mkcast(AEop op, Expr *e, TypeExpr *tr)
+static Expr *mkcast_1(AEop op, Expr *e, TypeExpr *tr)
 {   TypeExpr *te, *x, *y, *xp, *yp;
     Expr *r;
     SET_BITMAP m;
@@ -4590,7 +5046,7 @@ case 0: /* not obviously permissible, check more */
             switch (m & -m)    /* LSB - unsigned/long etc. are higher */
             {   case bitoftype_(s_bool):
                     if (!isprimtype_(y, s_bool))
-                    {   if ((h0_(e) != s_integer ||
+                    {   if (LanguageIsCPlusPlus && (h0_(e) != s_integer ||
                              (intval_(e) != 0 && intval_(e) != 1)))
                             cc_warn(sem_warn_unusual_bool, op);
                         e = mktest(op, e);
@@ -4798,7 +5254,7 @@ Expr *mkfieldselector(AEop op, Expr *e, ClassMember *mem)
     }
 }
 
-Expr *mkcond(Expr *a, Expr *b, Expr *c)
+static Expr *mkcond_1(Expr *a, Expr *b, Expr *c)
 {   Expr *r;
     TypeExpr *t, *t1, *t2;
     a = mktest(s_cond, a);   /* checks type of a */
@@ -4893,6 +5349,7 @@ Expr *mkcond(Expr *a, Expr *b, Expr *c)
 
 void sem_init(void)
 {   static Expr errorexpr = { s_error };
+    memset(bitint_binders, 0, sizeof(bitint_binders));
     errornode = &errorexpr;
 }
 

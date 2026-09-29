@@ -2870,7 +2870,14 @@ static RegValue *ExportedR2Val(RegValue *exportedr, BlockHead *bfrom, CmpRec *cm
       exportedr = RegValue_CopyList(exportedr);
     if (((blkflags_(bto) & BLK2EXIT) && blklength_(bto) <= 1)
         || (cmp_mask_(cmpk) != Q_AL && (blkflags_(bfrom) & BLKREXPORTED))) {
-      RegValue *p = RegValueForReg(cmp_r2_(cmpk));
+      VRegnum r = cmp_r2_(cmpk);
+      RegValue *p;
+      /* With no compare here, the useful register is the one the       */
+      /* destination compares.                                          */
+      if (cmp_mask_(cmpk) == Q_AL && blklength_(bto) == 1 &&
+          is_compare(blkcode_(bto)[0].op & J_TABLE_BITS))
+        r = blkcode_(bto)[0].r2.r;
+      p = RegValueForReg(r);
       if (p == NULL)
         return exportedr;
       else {
@@ -3328,6 +3335,10 @@ static void cse_scanblock(BlockHead *block)
   int callcount = 0;
   bool istop = block == top_block;
   cmpk.mask = Q_AL;
+  cmpk.r2 = GAP;                /* read by ExportedR2Val() regardless */
+  cmpk.r2vals = NULL;
+  cmpk.m = 0;
+  cmpk.cmpex = NULL;
   setnotused = NULL;
   storeaccesses = NULL;
   cse_currentblock = block;
@@ -3335,9 +3346,7 @@ static void cse_scanblock(BlockHead *block)
   blocksetup();
   ImportLocVals(block);
   for (c = blkcode_(block), limit = c + blklength_(block); c < limit; ++c) {
-#ifdef TARGET_IS_ARM_OR_THUMB
     RealRegUse reg;
-#endif
     ExSet *values = NULL;
     ExSet *values2 = NULL;
     ExSet *valuesToStore;
@@ -3673,18 +3682,21 @@ static void cse_scanblock(BlockHead *block)
             { int32 nres = k_resultregs_(r2.i);
             /* We need a better way of handling the divide + remainder functions */
               if (nres > 1) {
-                if (r1.r == R_A1+1 && nres == 2) {
+                if (r1.r == R_A1result+1 && nres == 2) {
                   /* Call is of a function returning two distinct results */
                   /* - only the second is used here. (div+rem fn, this    */
                   /* is use of rem)                                       */
                   values = FindRes2CallSet(r3.b, vregsort(r1.r), r2.i, arg, c);
-                  valno = r1.r-R_A1;
+                  valno = r1.r-R_A1result;
                 } else
                   /* either the div case of the above, or a function      */
                   /* returning a single result in multiple registers.     */
                   /* k_resultregs can't distinguish.                      */
-                if (r3.ex == arg1_(sim.div10fn) || r3.ex == arg1_(sim.udiv10fn)
-                    || r3.ex == arg1_(sim.divfn) || r3.ex == arg1_(sim.udivfn))
+                if (
+#ifdef TARGET_HAS_DIV_10_FUNCTION
+                    r3.ex == arg1_(sim.div10fn) || r3.ex == arg1_(sim.udiv10fn) ||
+#endif
+                    r3.ex == arg1_(sim.divfn) || r3.ex == arg1_(sim.udivfn))
                   values = FindCallSet(r3.b, vregsort(r1.r), r2.i, arg);
                 else {
 #ifdef TARGET_LACKS_2RESULT_CSE
@@ -3692,7 +3704,7 @@ static void cse_scanblock(BlockHead *block)
 #else
                   values = Find2ResCallSet(&values2, r3.b, vregsort(r1.r), r2.i, arg, c);
                   nvals = 1;
-                  valno = r1.r-R_A1;
+                  valno = r1.r-R_A1result;
 #endif
                 }
               } else {
@@ -4719,7 +4731,6 @@ BinaryR:
     if (corrupts_r2(c))
         cse_corrupt_register(r2.r);
 
-#ifdef TARGET_IS_ARM_OR_THUMB
     {
         /* Mark all registers which are either written or corrupted as 'corrupted'.
          * This is because CSE marks all registers with an unknown value as corrupted.
@@ -4731,7 +4742,6 @@ BinaryR:
         map_RealRegSet(&reg.c_out, corrupt_f, NULL);
         map_RealRegSet(&reg.def, corrupt_f, NULL);
     }
-#endif
 
     if (values == NULL && node != NULL)
       values = ExprnToSet(node);

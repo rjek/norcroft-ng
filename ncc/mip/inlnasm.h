@@ -1,5 +1,5 @@
 /*
- * inlnasm.h: ARM/Thumb inline assembler header
+ * inlnasm.h: inline assembler interface (currently ARM/Thumb only)
  * Copyright (C) Advanced Risc Machines Ltd., 1997
  * SPDX-Licence-Identifier: Apache-2.0
  */

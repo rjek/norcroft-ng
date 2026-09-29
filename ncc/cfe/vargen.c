@@ -182,16 +182,18 @@ static int32 genstring(String *s, int32 size)
 {   /* the efficiency of this is abysmal. */
     StringSegList *p = s->strseg;
     AEop sort = h0_(s);
-    int32 length = stringlength(p)/(sort == s_wstring ? 4 : 1);
+    int32 unit = stringunit_(sort);
+    char const *name = sort == s_wstring ? "wchar_t" :
+                       sort == s_u16string ? "char16_t" :
+                       sort == s_u32string ? "char32_t" : "char";
+    int32 length = stringlength(p)/unit;
     if (size == 0xffffff)
         size = length + 1;
     else if (length > size)
-        cc_rerr(vargen_err_long_string, sort==s_wstring ? "wchar_t":"char",
-                (long)size);
+        cc_rerr(vargen_err_long_string, name, (long)size);
     else if (length == size)
-        cc_warn(vargen_warn_nonull, sort==s_wstring ? "wchar_t":"char",
-                (long)size);
-    vg_genstring(p, size*(sort == s_wstring ? 4:1), 0);
+        cc_warn(vargen_warn_nonull, name, (long)size);
+    vg_genstring(p, size*unit, 0);
     return size;
 }
 
@@ -240,13 +242,33 @@ static int32 int_of_init0(Expr *init, bool *ok)
     return ival;
 }
 
+/* C99 permits an automatic aggregate's initialisers to be non-constant. */
+/* Its image is still made statically (with zero for those that are),   */
+/* then copied as usual (see genstaticparts()), and then each of them   */
+/* assigned, at the offset in the object that the image had reached.    */
+static Binder *c99_dyninit_obj;     /* the automatic object, if any     */
+static Binder *c99_dyninit_image;   /* its image                        */
+static Expr *c99_dyninits;          /* the assignments to it            */
+
+static bool c99_dynamic_init(Expr *e)
+{   Expr *lhs;
+    if (LanguageIsCPlusPlus || c99_dyninit_obj == NULL ||
+        isbitfield_type(inittype))
+        return NO;
+    lhs = mk_exprwdot(s_dot, inittype, (Expr *)c99_dyninit_obj,
+                      get_datadesc_size() - bindaddr_(c99_dyninit_image));
+    e = mkbinary(s_init, lhs, e);
+    c99_dyninits = c99_dyninits ? mkbinary(s_comma, c99_dyninits, e) : e;
+    return YES;
+}
+
 static int32 int_of_init(Expr *init)
 {   bool ok = YES;
     int32 ival = int_of_init0(init, &ok);
     if (!ok)
     {   if (LanguageIsCPlusPlus)
             dynamic_init(init, 0);
-        else
+        else if (!c99_dynamic_init(init))
             moan_nonconst(init, moan_static_int_type_nonconst,
                           moan_static_int_type_nonconst1,
                           moan_static_int_type_nonconst2);
@@ -260,13 +282,21 @@ static Int64Con *int64_of_init(Expr *init)
       bitoftype_(s_short)|bitoftype_(s_long)|bitoftype_(s_int),
       { 0, 0}
     };
+    static Int64Con small;
     Int64Con *fval = &zero;
     if (init != 0)
     {   if (h0_(init) == s_int64con)
             fval = (Int64Con *)init;
+        else if (h0_(init) == s_integer)
+        {   /* a 64-bit value which is a sign extended 32-bit one        */
+            small = zero;
+            small.bin.i.lo = (unsigned32)intval_(init);
+            small.bin.i.hi = intval_(init) < 0 ? -1 : 0;
+            fval = &small;
+        }
         else if (LanguageIsCPlusPlus)
             dynamic_init(init, 0);
-        else
+        else if (!c99_dynamic_init(init))
             moan_nonconst(init, moan_static_int_type_nonconst,
                           moan_static_int_type_nonconst1,
                           moan_static_int_type_nonconst2);
@@ -281,7 +311,7 @@ static FloatCon *float_of_init(Expr *init)
         else
         if (LanguageIsCPlusPlus)
             dynamic_init(init, 0);
-        else
+        else if (!c99_dynamic_init(init))
             moan_nonconst(init, moan_floating_type_nonconst,
                           moan_floating_type_nonconst1,
                           moan_floating_type_nonconst2);
@@ -289,11 +319,17 @@ static FloatCon *float_of_init(Expr *init)
     return fval;
 }
 
-static String *string_of_init(Expr *init, bool wide)
+/* sort is s_string (for arrays of char), s_wstring (wchar_t) or C11's  */
+/* s_u16string (char16_t) or s_u32string (char32_t).                    */
+#define INTSORTBITS (bitoftype_(s_int)|bitoftype_(s_long)|bitoftype_(s_short)|\
+                     bitoftype_(s_unsigned))
+
+static String *string_of_init(Expr *init, AEop sort)
 {   if (init != 0 && h0_(init) == s_invisible)
         init = orig_(init);     /* can only happen in CPLUSPLUS         */
     if (init != 0 && isstring_(h0_(init)))
-    {   if (wide == (h0_(init) == s_wstring)) return (String *)init;
+    {   if (sort == (stringunit_(h0_(init)) == 1 ? s_string : h0_(init)))
+            return (String *)init;
     }
     return 0;
 }
@@ -308,6 +344,32 @@ static int32 rd_bitinit(TypeExpr *t, int32 size)
     }
 /* One day it might be nice to compare the value read with size...      */
 }
+
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+/* With System V bitfields (see structfield() in sem.c), bitfields are  */
+/* initialised a byte at a time (for a little-endian target allocating  */
+/* them from the least significant bit): bytes [from, to) of the struct  */
+/* hold a run of them.                                                   */
+typedef struct { unsigned8 *b; int32 from, to; } BitfieldBytes;
+
+/* Read the initialiser for the bitfield of type t and k bits at bit    */
+/* pos of the struct.                                                    */
+static void bf_deposit(BitfieldBytes *bf, TypeExpr *t, int32 pos, int32 k)
+{   /* (The value may be wider than the field, as for an assignment.)   */
+    Int64Con *ic = int64_of_init(rdinit(unbitfield_type(t), 0, 0));
+    unsigned32 lo = ic->bin.i.lo, hi = (unsigned32)ic->bin.i.hi;
+    int32 i;
+    for (i = 0; i < k; i++)
+        if ((i < 32 ? lo >> i : hi >> (i - 32)) & 1)
+            bf->b[(pos + i) / 8] |= (unsigned8)(1 << ((pos + i) % 8));
+}
+
+static void bf_flush(BitfieldBytes *bf)
+{   int32 i;
+    for (i = bf->from; i < bf->to; i++) gendcI(1, bf->b[i]);
+    bf->b = NULL;
+}
+#endif
 
 /**************************************************************************
       oo          oo     Problem: This code is tailored to putting string
@@ -346,6 +408,12 @@ static void genpointer(Expr *einit)
             b = (Binder *)y;
             if (bindstg_(b) & b_fnconst)
                 Inline_RealUse(b);
+            if (attributes_(b) & A_TLS)     /* not a constant address */
+            {   if (!c99_dynamic_init(einit))
+                    cc_err(vargen_err_nonstatic_addr, b);
+                gendcI(sizeof_ptr, TARGET_NULL_BITPATTERN);
+                return;
+            }
             if ((bindstg_(b) & (bitofstg_(s_static) | u_loctype))
                  == bitofstg_(s_static))
             {   /* now statics may be local (and hence use datasegment
@@ -377,7 +445,8 @@ static void genpointer(Expr *einit)
                     gendcA(bindsym_(b), offset, xr);
             }
             else
-            {   cc_err(vargen_err_nonstatic_addr, b);
+            {   if (!c99_dynamic_init(einit))
+                    cc_err(vargen_err_nonstatic_addr, b);
                 if (sizeof_ptr == 8 && target_lsbytefirst)
                     gendcI(sizeof_ptr-4, TARGET_NULL_BITPATTERN);
                 else gendcI(sizeof_ptr, TARGET_NULL_BITPATTERN);
@@ -451,13 +520,14 @@ static void genpointer(Expr *einit)
                 /* we must use 'einit': (1) to avoid optimise0()        */
                 /*                  and (2) to keep 'offset'.           */
                 dynamic_init(einit, 0);
-            else
+            else if (!c99_dynamic_init(einit))
                 cc_err(vargen_err_bad_ptr, op);
             gendcI(sizeof_ptr, TARGET_NULL_BITPATTERN);
             return;
     }
 }
 
+#ifndef TARGET_HAS_SYSV_BITFIELDS
 static void initbitfield(unsigned32 bfval, int32 bfsize, bool pad_to_int)
 {
     int32 j;
@@ -474,6 +544,7 @@ static void initbitfield(unsigned32 bfval, int32 bfsize, bool pad_to_int)
             gendcI(1, bfval >> 24), bfval <<= 8;
     if (pad_to_int) padstatic(alignof_int);
 }
+#endif
 
 /* NB. this MUST be kept in step with sizeoftype and findfield (q.v.) */
 static void initsubstatic(TypeExpr *t, Binder *whole, bool aligned, Expr *einit)
@@ -500,13 +571,14 @@ case s_typespec:
                         /* these are all supposedly done as part of the
                          * enclosing struct or union.
                          */
-                    if (int_islonglong_(m)) {
+                    if (int_is64bit_(m)) {
 
                         if (einit == 0 && syn_canrdinit())
                             einit = rdinit(t,whole,0);
                         {   Int64Con *ic = int64_of_init(einit);
-                            gendcI_a(sizeof_long, ((int32 *)&ic->bin.i)[0], aligned);
-                            gendcI_a(sizeof_long, ((int32 *)&ic->bin.i)[1], aligned);
+                            /* the two 32-bit halves                        */
+                            gendcI_a(4, ((int32 *)&ic->bin.i)[0], aligned);
+                            gendcI_a(4, ((int32 *)&ic->bin.i)[1], aligned);
                         }
                         break;
                     }
@@ -563,11 +635,25 @@ case s_typespec:
                     ClassMember *l;
                     int32 bfsize, bfval, k, woffset;
                     bool is_union = ((m & -m) == bitoftype_(s_union));
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                    BitfieldBytes bf;
+                    int32 bfbytes = 0;
+                    bf.b = NULL;
+#endif
                     (void)sizeofclass(b, NULL);
                     if (!(tagbindbits_(b) & TB_DEFD))
                         cc_err(vargen_err_undefined_struct, b);
                     bfsize = bfval = woffset = 0;
-                    for (l = tagbindmems_(b); l != 0; l = memcdr_(l))
+                    l = tagbindmems_(b);
+                    /* The member of a union to initialise, if not the   */
+                    /* first, as C99 permits (see syn_prepare_init()).   */
+                    if (is_union && note && curlex.sym == s_dot)
+                    {   nextsym();
+                        while (l != 0 && memsv_(l) != curlex.a1.sv)
+                            l = memcdr_(l);
+                        nextsym();
+                    }
+                    for (; l != 0; l = memcdr_(l))
                       if (is_datamember_(l))
                       {
                         inittype = memtype_(l);
@@ -577,6 +663,22 @@ case s_typespec:
                         if (isbitfield_type(memtype_(l)))
                         {   if (is_union && memsv_(l) == NULL) continue;
                             k = membits_(l);
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                            {   int32 pos = 8*memwoff_(l) + memboff_(l);
+                                if (bf.b == NULL)
+                                {   int32 size = sizeoftype(t);
+                                    bf.b = (unsigned8 *)SynAlloc(size);
+                                    memclr(bf.b, size);
+                                    bf.from = bf.to = woffset;
+                                }
+                                /* ANSI 3rd draft says unnamed bitfields */
+                                /* never consume initialisers.           */
+                                if (memsv_(l) != NULL && k != 0)
+                                    bf_deposit(&bf, memtype_(l), pos, k);
+                                if ((pos + k + 7) / 8 > bf.to)
+                                    bf.to = (pos + k + 7) / 8;
+                            }
+#else
                             if (bfsize == 0)
                             {   while (woffset < memwoff_(l))
                                 {   gendcI(1, 0);
@@ -603,14 +705,23 @@ case s_typespec:
                                     bfval |= rd_bitinit(memtype_(l), k)
                                                 << leftshift;
                             }
+#endif
                         }
                         else
-                        {   if (bfsize != 0)
+                        {
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                            if (bf.b != NULL)
+                            {   bf_flush(&bf);
+                                woffset = bf.to;
+                            }
+#else
+                            if (bfsize != 0)
                             {   int32 align = memwoff_(l) & -memwoff_(l);
                                 initbitfield(bfval, bfsize, 0);
                                 padstatic(align > alignof_int ? alignof_int : align);
                                 bfsize = bfval = 0;
                             }
+#endif
                             if (!(tagbindbits_(b) & TB_UNALIGNED))
                             {   padstatic(alignof_member);
                                 padstatic(alignoftype(memtype_(l)));
@@ -629,10 +740,21 @@ case s_typespec:
                         /* only the 1st field of a union can be initialised */
                         if (is_union) break;
                       }
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                    if (bf.b != NULL)
+                    {   bf_flush(&bf);
+                        woffset = bfbytes = bf.to;
+                    }
+                    if (is_union)
+                        gendc0(sizeoftype(t) - (l==0 ? 0 : /* empty union!! */
+                             isbitfield_type(memtype_(l)) ? bfbytes :
+                                                            sizeoftype(memtype_(l))));
+#else
                     if (bfsize) initbitfield(bfval, bfsize, is_union);
                     if (is_union)
                         gendc0(sizeoftype(t) - (l==0 ? 0 : /* empty union!! */
                              bfsize ? sizeof_int : sizeoftype(memtype_(l))));
+#endif
                     /* See sem.c(sizeoftype) -- check this agrees   */
                     else
                         if (bfsize == 0 && woffset == 0)
@@ -642,6 +764,11 @@ case s_typespec:
                     break;
                 }
                 case bitoftype_(s_typedefname):
+                    /* A _BitInt's initialiser must be converted to it   */
+                    /* (not just its container).                         */
+                    if (einit == 0 && bitint_width(t) != 0 &&
+                        syn_canrdinit())
+                        einit = rdinit(t, whole, 0);
                     initsubstatic(bindtype_(typespecbind_(t)),
                                   whole, aligned, einit);
                     break;
@@ -662,6 +789,7 @@ default:
         syserr(syserr_initstatic1, (long)h0_(t));
 case t_subscript:
         {   int32 note = syn_begin_agg();          /* skips and notes if '{' */
+            AEop sort;
             int32 i, m = (typesubsize_(t) && h0_(typesubsize_(t)) != s_binder) ?
                 evaluate(typesubsize_(t)):0xffffff;
             TypeExpr *t2;
@@ -679,10 +807,10 @@ case t_subscript:
                     cc_err(vargen_err_open_array);
             }
             else if (t2 = princtype(typearg_(t)), isprimtype_(t2,s_char))
-            {   String *s = string_of_init(rdinit(0,0,1), 0);
+            {   String *s = string_of_init(rdinit(0,0,1), s_string);
                 if (s)
                 {   int32 k = genstring(s, m);
-                    if (s != string_of_init(rdinit(0,0,0), 0))
+                    if (s != string_of_init(rdinit(0,0,0), s_string))
                         syserr("vargen(string-peep)");
                     if (typesubsize_(t) == 0 || h0_(typesubsize_(t)) == s_binder )
                         typesubsize_(t) = globalize_int(k);
@@ -694,14 +822,20 @@ case t_subscript:
 /* t2 is maybe const/volatile 'signed T' or 'T', where T is the type of */
 /* wchar_t.  This needs to be improved if wchar_t can be some sort of   */
 /* char. */
-            else if (h0_(t2) == s_typespec && (typespecmap_(t2) &
-                            (bitoftype_(s_int)|bitoftype_(s_long)|
-                             bitoftype_(s_short)|bitoftype_(s_unsigned)))
-                            == typespecmap_(te_wchar))
-            {   String *s = string_of_init(rdinit(0,0,1), 1);
+            else if (h0_(t2) == s_typespec &&
+                     (sort = (typespecmap_(t2) & INTSORTBITS)
+                              == typespecmap_(te_wchar) ? s_wstring :
+                             !CStd(STD_C11) ? s_nothing :
+                             (typespecmap_(t2) & INTSORTBITS) ==
+                              (typespecmap_(te_ushort) & INTSORTBITS) ?
+                                 s_u16string :
+                             (typespecmap_(t2) & INTSORTBITS) ==
+                              (typespecmap_(te_uint) & INTSORTBITS) ?
+                                 s_u32string : s_nothing) != s_nothing)
+            {   String *s = string_of_init(rdinit(0,0,1), sort);
                 if (s)
                 {   int32 k = genstring(s, m);
-                    if (s != string_of_init(rdinit(0,0,0), 1))
+                    if (s != string_of_init(rdinit(0,0,0), sort))
                         syserr("vargen(string-peep)");
                     if (typesubsize_(t) == 0 || h0_(typesubsize_(t)) == s_binder)
                         typesubsize_(t) = globalize_int(k);
@@ -767,6 +901,15 @@ static void initstaticvar_1(
                (is_constdata()) ? "constdata" :
 #endif
                "data");
+    /* C99's designators are dealt with before vargen sees them (and     */
+    /* before b is placed, as compound literals in the initialiser may   */
+    /* be).                                                              */
+    if (CStd(STD_C99) && b != datasegment && einit == 0)
+    {   if (curlex.sym == s_lbrace)
+            syn_prepare_init(btype);
+        else if (syn_canrdinit())
+            (void)syn_rdinit(0, 0, 1);  /* read it now (peek)           */
+    }
     if (b != datasegment) padstatic(alignoftype(btype));
 
 /* ECN: Defer setting of oldtail & oldsize until after we have done padstatic
@@ -781,6 +924,17 @@ static void initstaticvar_1(
         oldxrefs = get_datadesc_xrefs();
     }
     bindaddr_(b) = get_datadesc_size();
+#ifdef TARGET_HAS_TLS
+    if (attributes_(b) & A_TLS)         /* addressed by its own symbol   */
+    {   Symstr *sym = tls_symbol(b);
+        labeldata(sym);
+        (void)obj_symref(sym,
+                xr_data+xr_tls+(bindstg_(b) & bitofstg_(s_extern) ?
+                                xr_defext : xr_defloc),
+                get_datadesc_size());
+    }
+    else
+#endif
     if (topflag) /* note: names of local statics may clash but cannot be
                     forward refs (except for fns which don't come here) */
     {   labeldata(bindsym_(b));
@@ -1012,7 +1166,10 @@ case bitofstg_(s_auto):                 /* includes register vars too   */
                 /*
                  * Create hidden static for auto initialiser.
                  */
+                if (CStd(STD_C99))
+                    c99_dyninit_obj = b, c99_dyninit_image = sb;
                 initstaticvar(sb, NO);
+                c99_dyninit_obj = NULL;
                 cur_initlhs = 0;
 /* Update bindtype_(b) in case it was typedef to open array which       */
 /* would have been copied (cloned) by initstaticvar().                  */
@@ -1051,6 +1208,10 @@ case bitofstg_(s_auto):                 /* includes register vars too   */
                 {   Expr *e = vg_get_dyninit(topflag);
                     if (e != 0)
                         dyninit = mkbinary(s_comma, dyninit, e);
+                }
+                if (c99_dyninits != NULL)
+                {   dyninit = mkbinary(s_comma, dyninit, c99_dyninits);
+                    c99_dyninits = NULL;
                 }
                 SetDataArea(DS_ReadWrite);
             }
@@ -1099,6 +1260,7 @@ case bitofstg_(s_extern):
         {                               /* (or small tentative).        */
 #ifdef CONST_DATA_IN_CODE
             if ((!LanguageIsCPlusPlus || dyninit) &&
+                !(attributes_(b) & A_TLS) &&
                 (qualifiersoftype(d->decltype) & bitoftype_(s_const)) &&
                 ( !(config & CONFIG_REENTRANT_CODE) ||
                   pointerfree_type(d->decltype)) )
@@ -1135,6 +1297,14 @@ case bitofstg_(s_extern):
                 {   bindstg_(b) |= b_generated;
                     SetDataArea(DS_Const);
                 }
+#endif
+#ifdef TARGET_HAS_TLS
+                if (attributes_(b) & A_TLS)
+                {   DataAreaSort old = SetDataArea(DS_Tls);
+                    initstaticvar_1(b, topflag, d->tentative, dyninit);
+                    SetDataArea(old);
+                }
+                else
 #endif
                 initstaticvar_1(b, topflag, d->tentative, dyninit);
             }

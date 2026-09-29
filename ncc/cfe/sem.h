@@ -98,6 +98,10 @@ extern bool sizeoftypelegal(TypeExpr *x);
 
 extern int32 alignoftype(TypeExpr *x);
 
+/* C23's _BitInt(n), and the width of a _BitInt type (or 0).            */
+extern TypeExpr *bitint_type(int32 n, bool isunsigned);
+extern int32 bitint_width(TypeExpr *t);
+
 /* equivtype functions return 0=differ, 1=equivalent for C, 2=identical */
 extern int equivtype(TypeExpr *t1, TypeExpr *t2);
 extern int qualfree_equivtype(TypeExpr *t1, TypeExpr *t2);

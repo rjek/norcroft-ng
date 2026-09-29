@@ -92,18 +92,26 @@
 #include "builtin.h"  /* sim */
 #include "aeops.h"    /* bitofstg_(), s_register - sigh */
 #include "sr.h"
+#ifdef TARGET_IS_ARM_OR_THUMB
 #include "armops.h"
+#endif
 #include "inlnasm.h"
 
 static uint32 warn_corrupted_regs;
 
 /* Only one (of size vregistername) of these is allocated, so array OK. */
 static unsigned char *reg_lsbusetab;
+/* The number of bits in a register (as far as the char optimiser is    */
+/* concerned).                                                          */
+#ifdef TARGET_HAS_64BIT_INTREGS
+#define ALLBITS 64
+#else
 #define ALLBITS 32
+#endif
 
 static int spaceofmask(unsigned32 m)
 {   int k = 0;
-    if (m & 0x80000000) return 32;  /* For sake of 64 bit machines */
+    if (m & 0x80000000) return ALLBITS;  /* For sake of 64 bit machines */
     while (m) m>>=1, k++;
     return k==0 ? 1 : k;            /* treat 0 as 1 */
 }
@@ -112,7 +120,8 @@ static int min(int a, int b)        /* max is in misc.c!! */
 {   return a<=b ? a : b;
 }
 
-#define extend_bitsused(x) ((x)==0 || (x)==1 ? 8 : (x)==2 ? 16 : ALLBITS)
+#define extend_bitsused(x) ((x)==0 || (x)==1 ? 8 : (x)==2 ? 16 : \
+                            (x)==3 || (x)==4 ? 32 : ALLBITS)
 
 /* Return number of least sig bits in arg which contribute to result.   */
 /* The case we really want for 'short' on the ARM is that SHRK 8; STRB  */
@@ -148,8 +157,8 @@ case J_LDRV: /* Propagate number of bits needed to variable from value  */
   /* Now some more fun cases...                                           */
 case J_ANDK: demand = (int)min(demand,spaceofmask(ic->r3.i)); break;
 /* For the next cautious test remember TARGET_LACKS_RIGHTSHIFT.         */
-case J_SHLK: demand = 0<=ic->r3.i && ic->r3.i<32 ? (int)max(demand-(int)ic->r3.i,1) : ALLBITS; break;
-case J_SHRK: demand = 0<=ic->r3.i && ic->r3.i<32 ? (int)min(demand+(int)ic->r3.i,32) : ALLBITS; break;
+case J_SHLK: demand = 0<=ic->r3.i && ic->r3.i<ALLBITS ? (int)max(demand-(int)ic->r3.i,1) : ALLBITS; break;
+case J_SHRK: demand = 0<=ic->r3.i && ic->r3.i<ALLBITS ? (int)min(demand+(int)ic->r3.i,ALLBITS) : ALLBITS; break;
 /* Why don't we change extend so that it takes a mask like ANDK?        */
 case J_EXTEND: demand = extend_bitsused(ic->r3.i); break;
     }
@@ -1245,6 +1254,7 @@ static void instruction_copy_info(const Icode *ic)
             copy_valnr(ic->r1.r, ic->r3.r);
             break;
         case J_LDRV:
+        case J_LDRLV:
         case J_LDRFV:
         case J_LDRDV:
             if (bindxx_(ic->r3.b) != GAP)
@@ -1253,6 +1263,7 @@ static void instruction_copy_info(const Icode *ic)
                 set_valnr(ic->r1.r);
             break;
         case J_STRV:
+        case J_STRLV:
         case J_STRFV:
         case J_STRDV:
             if (bindxx_(ic->r3.b) != GAP)
@@ -1355,6 +1366,7 @@ VRegSetP exitregset(VRegnum result, VRegSetP s)
         for (n = 1; n < currentfunction.nresultregs; n++)
             s = reference_register(result + n, ALLBITS, s, NULL);
     }
+#ifdef TARGET_IS_ARM_OR_THUMB
     if (pcs_flags & PCS_NOFP)
         s = reference_register(R_SP, ALLBITS, s, NULL); /* SP or FP alive on exit */
     else
@@ -1363,6 +1375,9 @@ VRegSetP exitregset(VRegnum result, VRegSetP s)
         s = reference_register(R_SL, ALLBITS, s, NULL); /* SL alive if stackchecking */
     if (pcs_flags & PCS_REENTRANT)
         s = reference_register(R_SB, ALLBITS, s, NULL); /* SB alive if reentrant */
+#else
+    s = reference_register(R_SP, ALLBITS, s, NULL);     /* SP alive on exit */
+#endif
     return s;
 }
 
@@ -1414,7 +1429,7 @@ static VRegSetP live_deleteresults(VRegInt r2, VRegSetP s1, bool *livep) {
     bool live = NO;
     for (; --n >= 0;) {
         bool live2;
-        s1 = live_delete(R_A1+n, s1, &live2);
+        s1 = live_delete(R_A1result+n, s1, &live2);
         live |= live2;
     }
     *livep = live;
@@ -1518,7 +1533,6 @@ static VRegSetP add_instruction_info(VRegSetP s1, Icode *ic, UPtr *deadp, bool r
                 }
             }
         }
-#ifdef TARGET_IS_ARM_OR_THUMB
         {
             RealRegUse reg;
             RealRegSet_MapArg a; a.vr = s1;
@@ -1530,7 +1544,6 @@ static VRegSetP add_instruction_info(VRegSetP s1, Icode *ic, UPtr *deadp, bool r
                 map_RealRegSet(&reg.use, use_f, &a);
             s1 = a.vr; /* copy altered set back! */
         }
-#endif
         return instruction_ref_info(s1, ic, deadp, ALLBITS);
 }
 
@@ -1593,7 +1606,7 @@ static bool liveresult(VRegnum r2, VRegSetP s1) {
 
 static VRegSetP set_result_registers(VRegnum r2, VRegSetP s1) {
     int32 n = k_resultregs_(r2);
-    for (; --n >= 0;) s1 = set_register(R_A1+n, s1);
+    for (; --n >= 0;) s1 = set_register(R_A1result+n, s1);
     return s1;
 }
 
@@ -1623,9 +1636,7 @@ static void collect_register_clashes(BlockHead *p)
     VRegSetP s1 = successor_regs(p);
     Icode *const q = blkcode_(p);
     int32 w;
-#ifdef TARGET_IS_ARM_OR_THUMB
     RealRegUse reg;
-#endif
     thisBlocksBindList = blkstack_(p);
 
     if (usrdbg(DBG_VAR) && !usrdbg(DBG_OPT_REG)) {
@@ -1653,13 +1664,11 @@ static void collect_register_clashes(BlockHead *p)
         bool live_psr = NO;
 /* Obviously, if TARGET_SHARES_INTEGER_AND_FP_REGISTERS then J_MOVDIR   */
 /* could make some optimisations...                                     */
-#ifdef TARGET_IS_ARM_OR_THUMB
         RealRegisterUse(ic, &reg);
         if (nonempty_RealRegSet(&reg.c_out, INTREG)) {
             RealRegSet_MapArg a; a.vr = s1;
             map_RealRegSet(&reg.c_out, crc_f1, &a);
         }
-#endif
         if (sets_psr(ic))
             s1 = live_delete(R_PSR, s1, &live_psr);
         if (updates_r2(op) && !live_member(ic->r2.r, s1))
@@ -1703,7 +1712,7 @@ static void collect_register_clashes(BlockHead *p)
 #endif
                    )
                     s1 = set_register_copy(ic->r1.r, s1, ic->r3.r);
-                else if ((op==J_LDRV || op==J_LDRFV || op==J_LDRDV) &&
+                else if ((op==J_LDRV || op==J_LDRLV || op==J_LDRFV || op==J_LDRDV) &&
                          bindxx_(ic->r3.b) != GAP)
                 {
                     s1 = set_register_copy(ic->r1.r, s1, bindxx_(ic->r3.b));
@@ -1717,7 +1726,11 @@ static void collect_register_clashes(BlockHead *p)
                             && extend_bitsused(ic->r3.r) >= reg_lsbusetab[ic->r1.r])
                         || (op == J_ANDK
                             && spaceofmask(ic->r3.r) >= reg_lsbusetab[ic->r1.r]
-                            && just32bits_(ic->r3.r) == (1L<<spaceofmask(ic->r3.r))-1)))
+                            && (spaceofmask(ic->r3.r) >= 32 ?
+                                   /* only AND with -1 (all 64 bits)      */
+                                   ALLBITS == 64 && ic->r3.i == -1 :
+                                   just32bits_(ic->r3.r) ==
+                                       (1L<<spaceofmask(ic->r3.r))-1))))
                 {   ic->op = op = J_MOVR;
                     ic->r3.r = ic->r2.r;
                     ic->r2.r = GAP;
@@ -1877,7 +1890,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
 #endif
 #endif
 
-
 #ifdef TARGET_HAS_2ADDRESS_CODE
 #  ifdef AVOID_THE_ACN_ADJUSTMENT_MADE_HERE
         if (jop_asymdiadr_(op) && ic->r2.r != ic->r3.r) add_clash(ic->r1.r, ic->r3.r);
@@ -1902,7 +1914,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
         }
 #  endif
 #endif
-#ifdef TARGET_IS_ARM_OR_THUMB
         {
             RealRegUse reg;
             RealRegSet_MapArg a; a.vr = s1;
@@ -1914,7 +1925,6 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
                 map_RealRegSet(&reg.use, use_f_reg, &a);
             s1 = a.vr; /* copy altered set back! */
         }
-#endif
         s1 = instruction_ref_info(s1, ic, NULL, demand);
 
 /* The following things that allow for workspace registers MUST be done  */
@@ -1931,11 +1941,11 @@ if (debugging(DEBUG_REGS)) live_print("plain LDRWx");
             reg.c_in.map[0] &= ~regbit(R_LR);
             corrupt_register(R_LR, s1);
         }
+#endif
         if (nonempty_RealRegSet(&reg.c_in, INTREG))
         {   RealRegSet_MapArg a; a.vr = s1;
             map_RealRegSet(&reg.c_in, crc_f1, &a);
         }
-#endif
     }
     vregset_discard(s1);
     if (debugging(DEBUG_REGS))

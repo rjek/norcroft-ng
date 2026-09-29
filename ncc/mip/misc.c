@@ -222,12 +222,25 @@ FloatCon *int_to_real(int32 n, int32 u, SET_BITMAP m)
     return real_of_string(s,m);
 }
 
+/* The same for a 64-bit integer (signed unless u).                     */
 FloatCon *int64_to_real(int64 const *n, int32 u, SET_BITMAP m)
-{   char s[32];
-    unsigned long long v = ((unsigned long long)(uint32)n->hi << 32) | n->lo;
-    if (u) _sprintf(s, "%llu.0", v);
-    else _sprintf(s, "%lld.0", (long long)v);
-    return real_of_string(s,m);
+{   char s[24], *p = &s[sizeof(s)];
+    uint64 v, ten, rem;
+    bool neg = !u && n->hi < 0;
+    if (neg) {
+        int64 t;
+        (void)I64_Neg(&t, n);           /* the most negative stays so */
+        v.lo = t.lo, v.hi = (uint32)t.hi;
+    } else
+        v.lo = n->lo, v.hi = (uint32)n->hi;
+    ten.lo = 10, ten.hi = 0;
+    *--p = 0, *--p = '0', *--p = '.';
+    do {
+        (void)I64_UDiv(&v, &rem, &v, &ten);
+        *--p = (char)('0' + rem.lo);
+    } while (v.lo != 0 || v.hi != 0);
+    if (neg) *--p = '-';
+    return real_of_string(p, m);
 }
 
 /* error message routines...
@@ -1500,8 +1513,17 @@ void cc_err(msg_t errorcode, ...)
 void flt_report_error(int failure) {
     switch (failure) {
     case flt_very_small:   cc_warn(fp_rerr_very_small); break;
+#ifdef OVERLARGE_FP_CONSTANTS_ARE_INFINITE
+    /* e.g. glibc defines HUGE_VAL as 1e10000 for non-GNU compilers.    */
     case flt_very_big:     cc_warn(fp_err_very_big); break;
+#else
+    case flt_very_big:     cc_rerr(fp_err_very_big); break;
+#endif
+#ifdef OVERLARGE_FP_CONSTANTS_ARE_INFINITE
     case flt_big_single:   cc_warn(fp_err_big_single); break;
+#else
+    case flt_big_single:   cc_rerr(fp_err_big_single); break;
+#endif
     case flt_small_single: cc_warn(fp_rerr_small_single); break;
     case flt_invalidop:    cc_warn(fp_warn_nan); break;
     default:               break;

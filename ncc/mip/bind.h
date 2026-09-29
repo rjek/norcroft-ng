@@ -69,6 +69,12 @@ extern LabBind *mk_labbind(LabBind *b, Symstr *c);
 
 extern void add_toplevel_binder(Binder *b);
 
+/* The symbol of C11 _Thread_local object b.                           */
+extern Symstr *tls_symbol(Binder *b);
+
+/* The tag being defined again (in C23), if any (see instate_tagbinding). */
+extern TagBinder *bind_take_redefined_tag(void);
+
 typedef enum {
   TD_NotDef,
   TD_ContentDef,

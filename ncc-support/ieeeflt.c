@@ -308,13 +308,22 @@ int fltrep_stod(const char *s, DbleBin *out, void *ignored)
         dblebin_set_double(out, 0.0);
         return flt_bad;
     }
-    /* the value is kept whatever happened: an infinity for overflow, a
-     * denormal or zero for underflow */
+
+    /* Even when out of range, the value is strtod's: infinity, zero or  */
+    /* subnormal, as IEEE arithmetic and C99's HUGE_VAL (1e10000 in      */
+    /* glibc's math.h for compilers other than gcc) want.                */
     dblebin_set_double(out, x);
-    if (x == HUGE_VAL || x == -HUGE_VAL)
+
+    if (x == HUGE_VAL)
         return flt_very_big;
-    if (errno == ERANGE && x == 0.0)
+
+    if (x == -HUGE_VAL)
         return flt_very_small;
+
+    if (errno == ERANGE) {
+        return flt_very_small;  // underflow
+    }
+
     return flt_ok;
 }
 

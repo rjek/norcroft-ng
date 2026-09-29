@@ -35,6 +35,7 @@
 #include "codebuf.h"        /* for padstatic()... */
 #include "cgdefs.h"         /* @@@ just for GAP */
 #include "bind.h"
+#include "inline.h"
 #include "builtin.h"
 #include "lex.h"            /* for curlex... */
 #include "sem.h"            /* for prunetype, equivtype... */
@@ -767,7 +768,7 @@ if (!(flags & FB_NOTYET))
             if (membits_(l) != 0) {
                 if (target_lsbitfirst) {
                     int32 maxsize = MAXBITSIZE;
-                    if (int_islonglong_(typespecmap_(memtype_(l)))) maxsize = sizeof_longlong*8;
+                    if (int_is64bit_(typespecmap_(memtype_(l)))) maxsize = 64;
                     n = (membits_(l)+memboff_(l)) % maxsize;
                     if (n != 0) n = maxsize - n;
                 } else
@@ -781,6 +782,31 @@ if (!(flags & FB_NOTYET))
         return path_to_base_member(member, tb, flags, vbases, privately_deriving_class);
     else {
         IGNORE(vbases); IGNORE(privately_deriving_class);
+    }
+    return NULL;
+}
+
+/* C11 anonymous struct and union members: they have invented names,    */
+/* and their members are found as if members of the enclosing class.    */
+/* The path is a single s_dot, whose offset is that of the member        */
+/* within the anonymous member plus that of the anonymous member.        */
+static Expr *path_through_anon_members(ClassMember *member, TagBinder *tb,
+                                       int flags)
+{   ClassMember *l;
+    for (l = tagbindmems_(tb); l != NULL; l = memcdr_(l))
+    {   TypeExpr *t;
+        TagBinder *ab;
+        Expr *e;
+        if (h0_(l) != s_member || !isgensym(memsv_(l))) continue;
+        t = princtype(memtype_(l));
+        if (!isclasstype_(t)) continue;
+        ab = typespectagbind_(t);
+        e = path_to_member_1(member, ab, flags, NULL, NULL);
+        if (e == NULL) e = path_through_anon_members(member, ab, flags);
+        if (e != NULL && h0_(e) == s_dot)
+        {   exprdotoff_(e) += memwoff_(l);
+            return e;
+        }
     }
     return NULL;
 }
@@ -806,7 +832,10 @@ Expr *path_to_member(ClassMember *member, TagBinder *b, int flags)
             e = arg2_(e);
     }
     else
-        e = path_to_member_1(member, b, flags, NULL, NULL);
+    {   e = path_to_member_1(member, b, flags, NULL, NULL);
+        if (e == NULL && h0_(member) == s_identifier)
+            e = path_through_anon_members(member, b, flags);
+    }
     return e;
 }
 
@@ -1026,6 +1055,18 @@ static ClassMember *instate_member_1(DeclRhsList *d, int bindflg)
 
 /* struct/union/enum tag bindings ... */
 
+/* In C23 a struct or union may be defined again (identically) in the   */
+/* same scope: instate_tagbinding() then returns a new TagBinder for the */
+/* definition to be read into, and notes the original to be taken by    */
+/* the caller to compare it with (and then use it).                     */
+static TagBinder *redefined_tag;
+
+TagBinder *bind_take_redefined_tag(void)
+{   TagBinder *b = redefined_tag;
+    redefined_tag = NULL;
+    return b;
+}
+
 TagBinder *instate_tagbinding(Symstr *sv, AEop s, TagDefSort defining,
             int bindflg, bool *newtag)
 {   TagBinder *b;
@@ -1054,6 +1095,11 @@ TagBinder *instate_tagbinding(Symstr *sv, AEop s, TagDefSort defining,
                     !SuppressDB_Has(Suppress_Future))
                     cc_warn(bind_warn_cpp_scope_differ, b);
             }
+            else if (defining == TD_ContentDef && CStd(STD_C23) &&
+                     s != s_enum && (tagbindbits_(b) & TB_DEFD))
+            {   redefined_tag = b;
+                b = global_mk_tagbinder(0, sv, s);
+            }
             else if (defining != TD_Decl && (tagbindbits_(b) & (TB_DEFD|TB_BEINGDEFD)))
                 cc_err(bind_err_duplicate_tag, tagbindsort(b),b);
         }
@@ -1071,6 +1117,13 @@ TagBinder *instate_tagbinding(Symstr *sv, AEop s, TagDefSort defining,
                 b = NULL;
             }
 
+            if (b != 0 && tag_found_in_local_scope &&
+                defining == TD_ContentDef && CStd(STD_C23) && s != s_enum &&
+                (tagbindbits_(b) & TB_DEFD))
+            {   redefined_tag = b;
+                b = global_mk_tagbinder(0, sv, s);
+                goto defined_again;
+            }
             if (b != 0 && tag_found_in_local_scope &&
                 (((tagbindbits_(b) & TB_DEFD) && defining != TD_Decl)
                  ||  /* re-definition */
@@ -1107,6 +1160,7 @@ TagBinder *instate_tagbinding(Symstr *sv, AEop s, TagDefSort defining,
             }
         }
     }
+defined_again:
     if ((tagbindbits_(b) & ENUMORCLASSBITS) != bitoftype_(s) &&
         ((tagbindbits_(b) & (bitoftype_(s_union)|bitoftype_(s_enum)))
          || s == s_union || s == s_enum))
@@ -1408,8 +1462,10 @@ static void check_ansi_linkage(Binder *b, DeclRhsList *d)
         if ((d->declstg & b_globalregvar) ||
             (d->declstg & bitofstg_(s_static)) &&
                  !(d->declstg & b_implicitstg) ||
+            /* (A function declared without a storage class has the   */
+            /* linkage of an earlier declaration, as if extern.)        */
             (d->declstg & bitofstg_(s_extern)) &&
-                   (d->declstg & b_implicitstg) ||
+                   (d->declstg & b_implicitstg) && !isfntype(d->decltype) ||
             ((bindstg_(b) ^ d->declstg) & bitofstg_(s_weak)))
         {   /* Oldest linkage wins... */
             SET_BITMAP oldstg = bindstg_(b) & (bitofstg_(s_static)|bitofstg_(s_extern)|bitofstg_(s_weak));
@@ -1982,9 +2038,34 @@ ClassMember *instate_member(DeclRhsList *d, int bindflg)
                                  instate_member_1(d, bindflg);
 }
 
+/* The symbol of C11 _Thread_local object b (whose data is addressed by  */
+/* its own symbol, not relative to a segment's): its own name if it is   */
+/* extern, else one made unique (as the names of statics in blocks may   */
+/* clash) by its offset in the thread-local data, which copies of b (in  */
+/* inlined code) share.                                                 */
+Symstr *tls_symbol(Binder *b)
+{   char name[80];
+    if (bindstg_(b) & bitofstg_(s_extern)) return bindsym_(b);
+    sprintf(name, "%.60s.tls%ld", symname_(bindsym_(b)), (long)bindaddr_(b));
+    return sym_insert_id(name);
+}
+
 Binder *instate_declaration(DeclRhsList *d, int declflag)
-{   return LanguageIsCPlusPlus ? instate_declaration_cpp(d, declflag) :
-                                 instate_declaration_1(d, declflag);
+{   Binder *b;
+    if (LanguageIsCPlusPlus) return instate_declaration_cpp(d, declflag);
+    b = instate_declaration_1(d, declflag);
+    /* In C99, a function is defined externally (as well as perhaps    */
+    /* inline) if any declaration of it at file scope is extern or not */
+    /* inline.                                                          */
+    if (CStd(STD_C99) && (declflag & TOPLEVEL) && b != NULL &&
+        isfntype(d->decltype) &&
+        (!(d->declstg & bitofstg_(s_inline)) ||
+         (d->declstg & (bitofstg_(s_extern)|b_implicitstg)) ==
+             bitofstg_(s_extern)))
+    {   attributes_(b) |= A_EXTDEF;
+        if (!(bindstg_(b) & bitofstg_(s_static))) Inline_NeedExternal(b);
+    }
+    return b;
 }
 
 /* label bindings... */

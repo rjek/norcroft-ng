@@ -21,7 +21,8 @@
 
 typedef struct SymInfo {
     AEop sym;
-    union { char *s; int32 i; Symstr *sv; FloatCon *fc; Int64Con *i64; } a1;
+    union { char *s; int32 i; Symstr *sv; FloatCon *fc; Int64Con *i64;
+            Expr *e; } a1;          /* (e: s_invisible, see lex_replay()) */
     union { IPtr len, flag; } a2;
     FileLine fl;
 } SymInfo;
@@ -37,6 +38,18 @@ extern int asm_mode;
 
 extern AEop nextsym(void);
 extern void ungetsym(void);     /* right inverse of nextsym */
+
+/* Make the symbols in the list of chunks r the current and following    */
+/* ones, before the current one, which goes in the last symbol of the    */
+/* last chunk.  An s_invisible symbol stands for the expression a1.e,   */
+/* already read (see syn_prepare_init()).                               */
+#define LEX_REPLAYCHUNK 128
+typedef struct LexReplay {
+    struct LexReplay *next;
+    int32 n;
+    SymInfo tok[LEX_REPLAYCHUNK];
+} LexReplay;
+extern void lex_replay(LexReplay *r);
 
 extern int errs_on_this_sym;
 

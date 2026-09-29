@@ -330,7 +330,7 @@ static struct EnvTable setupenv;
 
 char const Tool_Name[] = TOOLFILENAME;
 
-#ifdef COMPLING_ON_UNIX
+#ifdef COMPILING_ON_UNIX
 #  define Compiling_On_Unix 1
 #else
 #  define Compiling_On_Unix 0
@@ -1030,7 +1030,8 @@ case LANG_EXTN:
               }
 #ifdef NO_OBJECT_OUTPUT2                /* @@@ '2' is a temp hack       */
 #ifndef HOST_CANNOT_INVOKE_ASSEMBLER
-              if (!(flags & (KEY_PREPROCESS|KEY_MAKEFILE|KEY_ASM_OUT)))
+              if (!(flags & (KEY_PREPROCESS|KEY_MAKEFILE|KEY_ASM_OUT)) &&
+                  toolenv_lookup(t, ".pp_only") == NULL)    /* -E */
               {   if (assembler(t, out_name, out_file) != 0)
                   {   main_error_count++;
                       remove(out_file);
@@ -1529,8 +1530,8 @@ static bool HandleArg(ToolEnv *t, char const *current, char const *nextarg, bool
               break;
 
   case 'L':   if (Compiling_On_Unix)
-              {   if (current[1] == 'l')
-                      AddInclude(t, "-L.", &current[2]);
+              {   if (current[1] == 'l')        /* -lfoo, kept as is for ld */
+                      AddInclude(t, "-L.", current);
                   else
                       AddArg(&ld_arg, current);
               }
@@ -1815,6 +1816,22 @@ static KW const keytab[] = {
       {"-extend",    KEY_LONGLINES, NULL, NULL},
 #else /* not FORTRAN or PASCAL */
       {"-ansi",      0, ".lang", "=-ansi"},
+      {"-std=c89",   0, ".std", "=199409"},
+      {"-std=c90",   0, ".std", "=199409"},
+      {"-std=gnu89", 0, ".std", "=199409"},
+      {"-std=gnu90", 0, ".std", "=199409"},
+      {"-std=c99",   0, ".std", "=199901"},
+      {"-std=gnu99", 0, ".std", "=199901"},
+      {"-std=c11",   0, ".std", "=201112"},
+      {"-std=gnu11", 0, ".std", "=201112"},
+      {"-std=c17",   0, ".std", "=201710"},
+      {"-std=c18",   0, ".std", "=201710"},
+      {"-std=gnu17", 0, ".std", "=201710"},
+      {"-std=gnu18", 0, ".std", "=201710"},
+      {"-std=c23",   0, ".std", "=202311"},
+      {"-std=c2x",   0, ".std", "=202311"},
+      {"-std=gnu23", 0, ".std", "=202311"},
+      {"-std=gnu2x", 0, ".std", "=202311"},
       {"-ansic",     0, ".lang", "=-ansi"},
       {"-pcc",       0, ".lang", "=-pcc"},
       {"-fussy",     0, ".lang", "=-strict"},
@@ -2087,6 +2104,14 @@ static void FinishedOptions(ToolEnv *t) {
 #  endif
 #endif
       AddInclude(t, "-I.", path);
+#ifdef DRIVER_EXTRA_INCLUDES
+      /* Further system directories, searched after 'path'.             */
+      {   static char const * const extra[] = DRIVER_EXTRA_INCLUDES;
+          Uint i;
+          for (i = 0; i < sizeof(extra)/sizeof(extra[0]); i++)
+              AddInclude(t, "-I.", extra[i]);
+      }
+#endif
   }
 
   /* If compiling on Unix and in Ansi mode add extra libraries. */

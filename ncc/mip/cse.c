@@ -1386,7 +1386,7 @@ static Icode *StoreCSE(Icode *newic, CSEDef *def)
     VRegnum r1 = newic->r1.r;
     if (is_calln(defex_(def))) {
         int32 i, nres = exnres_(defex_(def));
-        r1 = R_A1;
+        r1 = R_A1result;
         /* Local CSE def which is a non-local ref */
         /* @@@ presumably, this should never happen now */
         /*   r2 = call->r1.r;*/
@@ -2357,7 +2357,8 @@ static BindList *ModifyCode(void)
                         blk_pred_(next1) = mk_CSEBlockList(NULL, prev);
                         blk_pred_(after) = mk_CSEBlockList(mk_CSEBlockList(NULL, next), next1);
                     }
-                    /* the block's old exits now belong to the last new block */
+                    /* The original successors of b now follow the last */
+                    /* of the new blocks.                               */
                     prev = bv[n-1];
 #ifdef TARGET_ALLOWS_COMPARE_CSES
                     /* If the expression setting the condition for the  */

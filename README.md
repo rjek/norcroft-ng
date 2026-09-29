@@ -13,12 +13,18 @@ There is also a backend for MEOW, a toy 16-bit-instruction RISC
 microcontroller, built as `nmcc`; it writes ELF objects for MEOW's `mld`
 linker, or assembler for its `mas` with `-S`.
 
+There are also experimental i386 and x86-64 Linux targets, which emit GNU
+assembler source and use the system's assembler, linker and C library.
+
 ## Contents
 
 - **`ncc/`** — the compiler source code.
 
 - **`ncc-support/`** — newly recreated support code and glue. These files will
   be replaced with original equivalents as they are located.
+
+- **`runtime/`** - runtime support libraries for targets that need them, built
+  by the compiler itself.
 
 - **`tests/`** - simple test suite that can check compilation of tests in
   various ways - assembler output or assertions that the test's syntax
@@ -54,6 +60,18 @@ Where:
 - `HOST=riscos` first compiles a compiler for the current host (ncc-riscos),
    and uses that to build a native RISC OS executable (`ncc,ff8`).
 
+`TARGET=i386` builds `bin/ncc-i386`, a cross compiler for i386 Linux. It needs
+the system's 32-bit development files (e.g. Debian's `gcc-multilib`) to link,
+and its runtime library, which it links in automatically once built with:
+```
+make runtime TARGET=i386
+```
+
+`TARGET=x86_64` builds `bin/ncc-x86_64`, a compiler for x86-64 Linux following
+the System V psABI (so it can call, and be called by, code from other
+compilers). Its code is position independent, so it links PIE executables
+or shared libraries, and it needs no runtime library.
+
 ### Examples:
 Cross-compiler for targeting 26-bit RISC OS 3 or 4. Builds `bin/ncc-riscos26`:
 ```
@@ -77,6 +95,15 @@ make all        # ncc & n++
 make clean
 make distclean
 ```
+
+### Tests
+```
+./runtests.py                    # ARM tests, using bin/ncc-riscos
+./runtests.py --cc bin/ncc-i386 --features i386,i386-run tests/i386
+./runtests.py --cc bin/ncc-x86_64 --features x86_64,x86_64-run tests/x86_64
+```
+Drop `i386-run` or `x86_64-run` to run only the tests that don't need to link
+and run programs (the x86-64 ones also use the host's `cc`).
 
 ## Notes
 `TARGET=riscos` produces code for RISC OS 5 with unaligned loads disabled

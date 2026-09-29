@@ -26,6 +26,10 @@ extern void syn_end_agg(int32 beganbrace);
 extern Expr *syn_rdinit(TypeExpr *t, Binder *whole, int32 flag);
 extern bool syn_canrdinit(void);
 
+/* Read the initialiser, starting '{', of an object of type t, and have  */
+/* syn_rdinit() and friends read an equivalent without C99 designators. */
+extern void syn_prepare_init(TypeExpr *t);
+
 extern Expr *rd_expr(int n);
 extern Expr *rd_ANSIstring(void);
 extern TopDecl *rd_topdecl(bool);

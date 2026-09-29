@@ -213,7 +213,13 @@ static Expr *optimise_cast(Expr *e)
 /* A cast is ineffectual if it does not change the m/c representation.   */
     if (e_mode < 2 && a_mode < 2)        /* cast of integral to integral */
     {
-        if (e_mode == a_mode && e_len > a_len)
+        if (e_mode == a_mode && e_len > a_len
+#ifdef TARGET_HAS_64BIT_INTREGS
+            /* but not to 64 bits: a register only holds the bottom 32  */
+            /* bits of a smaller value (see J_W32 in jopcode.h).         */
+            && e_len <= 4
+#endif
+           )
             return a1;         /* vacuous signedness-preserving widening */
 
 /* Things like (int)(unsigned char)x are NOT vacuous, even though cg     */
@@ -324,6 +330,22 @@ static Expr *RemovableSignOrZeroExtension(Expr *a, uint32 mask) {
    in case s_addrof requires it to be idempotent.
 */
 
+/* Whether t is a 64-bit integer type, whose expressions the rewrites   */
+/* here that work with 32-bit constants, masks and shift counts must    */
+/* leave alone (with TARGET_HAS_64BIT_INTREGS).  Pointers are excluded, */
+/* as their constant offsets are small.                                 */
+static bool is64bitint(TypeExpr *t)
+{
+#ifdef TARGET_HAS_64BIT_INTREGS
+    t = princtype(t);
+    return h0_(t) == s_typespec && int_is64bit_(typespecmap_(t)) &&
+           !(typespecmap_(t) & bitoftype_(s_double));
+#else
+    IGNORE(t);
+    return NO;
+#endif
+}
+
 static Expr *EvalBinaryOp(AEop op, TypeExpr *t, Expr *e1, Expr *e2) {
 /* e1 and e2 known to be of sort s_integer. This is not a call to mkbinary()
  * because that may generate unwanted warnings about overflow. Also, we would
@@ -397,6 +419,9 @@ static Expr *optimise1b(Expr *e, Expr *a1, Expr *a2,
         else if (is_same(a21, a22))
           return DistributedOp(h0_(a1), op, type_(e), a21, a11, a12, valneeded);
       }
+    /* The rewrites below of integer expressions with constants work in */
+    /* 32 bits.                                                         */
+    if (is64bitint(te)) goto symmetric_done;
     if (op == s_minus) {
       if (is_fpzero(a1)) { h0_(e) = s_neg; arg1_(e) = a2; return e; }
       if (is_fpzero(a2)) return a1;
@@ -810,7 +835,16 @@ static bool IsCompareK(Expr *e, CompKDesc *kd) {
     } else
       return NO;
     if (op == s_greater) {
-      if ((mcrepofexpr(kd->e) & MCR_SORT_MASK) == MCR_SORT_UNSIGNED) {
+      int32 mcr = mcrepofexpr(kd->e);
+#ifdef TARGET_HAS_64BIT_INTREGS
+      /* A 64-bit constant held as an s_integer is sign extended.       */
+      if ((mcr & MCR_SIZE_MASK) == 8) {
+        if (n == 0x7fffffff ||
+            ((mcr & MCR_SORT_MASK) == MCR_SORT_UNSIGNED && n == -1))
+          return NO;
+      } else
+#endif
+      if ((mcr & MCR_SORT_MASK) == MCR_SORT_UNSIGNED) {
         if (n == just32bits_(-1))
           return NO;
       } else {
@@ -836,29 +870,38 @@ static Expr *OptimiseComparePair(CompKDesc const *k1, CompKDesc const *k2) {
       op = k2->op;
       high = k2->n;
     }
-  } else if (k1->op == s_less || k1->op == s_lessequal) {
+  } else if ((k1->op == s_less || k1->op == s_lessequal) &&
+             k2->op == s_greaterequal) {
     op = k1->op;
     high = k1->n;
-    if (k2->op == s_greaterequal) {
-      low = k2->n;
-    }
+    low = k2->n;
   }
   if (op != s_nothing) {
     int32 mcr = mcrepofexpr(k1->e);
+    TypeExpr *ut = te_uint;
+#ifdef TARGET_HAS_64BIT_INTREGS
+    if ((mcr & MCR_SIZE_MASK) == 8) {
+      /* The constants are sign extended, so an unsigned range must be  */
+      /* in the bottom 2^31.                                            */
+      if ((mcr & MCR_SORT_MASK) == MCR_SORT_UNSIGNED && (low < 0 || high < 0))
+        return NULL;
+      ut = te_ulint;
+    }
+#endif
     if (((mcr & MCR_SORT_MASK) == MCR_SORT_UNSIGNED
          && (uint32)low < (uint32)high)
         || (high - low) > 0) {
-      Binder *b = gentempbinder(te_uint);
+      Binder *b = gentempbinder(ut);
       TypeExpr *t = typeofexpr(k1->e);
       Expr *a1 = low == 0 ? k1->e :
                             mk_expr2(s_minus, t, k1->e, mkintconst(t, low, 0));
       return mk_exprlet(s_let, te_int, mkSynBindList(0, b),
         mk_expr2(s_comma, te_int,
           mk_expr1(s_cast, te_void,
-            mk_expr2(s_assign, te_uint, (Expr *)b,
-              mk_expr1(s_cast, te_uint, a1))),
+            mk_expr2(s_assign, ut, (Expr *)b,
+              mk_expr1(s_cast, ut, a1))),
           mk_expr2(op, te_int, (Expr *)b,
-            mkintconst(te_uint, high-low, 0))));
+            mkintconst(ut, high-low, 0))));
     }
   }
   return NULL;
@@ -1331,7 +1374,7 @@ static Expr *optimise1(Expr *e, bool valneeded, bool *pure)
                   break;
                 }
               }
-              if (n == 0) {
+              if (n == 0 && !is64bitint(typeofexpr(a1))) {
                 a1 = IgnoreSignednessChange(a1);
                 if (h0_(a1) == s_and && h0_(arg2_(a1)) == s_integer) {
                 /* This is meant to improve comparisons of (unsigned) bitfields
@@ -1405,7 +1448,8 @@ static Expr *optimise1(Expr *e, bool valneeded, bool *pure)
                 intval_(e0r) += intval_(arg2_(e0l));
                 e0l = arg1_(e) = arg1_(e0l);
             }
-            if (op == s_leftshift && h0_(e0r) == s_integer) {
+            if (op == s_leftshift && h0_(e0r) == s_integer &&
+                !is64bitint(type_(e))) {
               if (h0_(e0l) == s_and && h0_(e1r = arg2_(e0l)) == s_integer) {
                 e1l = arg1_(e0l);
                 op2 = h0_(e1l);
@@ -1904,17 +1948,21 @@ case s_typespec:
             if (container)
                 m = typeofenumcontainer(typespectagbind_(x));
             goto mcrepofint;
+    case bitoftype_(s_bool):
+            if (!LanguageIsCPlusPlus) m |= bitoftype_(s_unsigned);
+            goto mcrepofint;
     case bitoftype_(s_char):
             if ((m & (bitoftype_(s_signed)|bitoftype_(s_unsigned))) == 0)
                 m |= HasFeature(Feature_SignedChar) ?
                          bitoftype_(s_signed) : bitoftype_(s_unsigned);
             /* drop through */
     case bitoftype_(s_int):
-    case bitoftype_(s_bool):
     mcrepofint:
             {   int32 n = sizeoftype(x);
+#ifndef TARGET_HAS_64BIT_INTREGS    /* else an ordinary integer         */
                 if (int_islonglong_(m))
                     return MCR_SORT_STRUCT + n;
+#endif
                 return n +
                     (m & bitoftype_(s_unsigned) ?
                           m & bitoftype_(s_signed) ? MCR_SORT_PLAIN :
@@ -2008,6 +2056,72 @@ int32 mcrepoftype(TypeExpr *t)
     return mcrepofexpr(mk_expr2(s_invisible, t, 0, 0));
 }
 
+#ifdef TARGET_HAS_SYSV_AMD64_ABI
+
+static int32 amd64_merge(int32 a, int32 b)
+{   if (a == b || b == AMD64_NONE) return a;
+    if (a == AMD64_NONE) return b;
+    if (a == AMD64_MEMORY || b == AMD64_MEMORY) return AMD64_MEMORY;
+    if (a == AMD64_INTEGER || b == AMD64_INTEGER) return AMD64_INTEGER;
+    return AMD64_SSE;
+}
+
+/* Merge the classes of the parts of an object of type t at byte offset */
+/* off into cls[].                                                      */
+static void amd64_classify1(TypeExpr *t, int32 off, int32 cls[2])
+{   int32 c;
+    t = princtype(t);
+    switch (h0_(t))
+    {
+case t_subscript:
+        {   TypeExpr *e = typearg_(t);
+            int32 esize = sizeoftype(e), size = sizeoftype(t), i;
+            for (i = 0; esize > 0 && i < size && off + i < 16; i += esize)
+                amd64_classify1(e, off + i, cls);
+            return;
+        }
+case s_typespec:
+        {   SET_BITMAP m = typespecmap_(t);
+            if (m & CLASSBITS)
+            {   ClassMember *l;
+                for (l = tagbindmems_(typespectagbind_(t)); l != 0; l = memcdr_(l))
+                {   int32 moff = off + memwoff_(l);
+                    if (!is_datamember_(l)) continue;
+                    if (isbitfield_type(memtype_(l)))
+                    {   if (moff < 16)
+                            cls[moff/8] = amd64_merge(cls[moff/8], AMD64_INTEGER);
+                    }
+                    else if (moff % alignoftype(memtype_(l)) != 0)
+                        cls[0] = cls[1] = AMD64_MEMORY;     /* unaligned  */
+                    else
+                        amd64_classify1(memtype_(l), moff, cls);
+                }
+                return;
+            }
+            c = (m & bitoftype_(s_double)) ? AMD64_SSE : AMD64_INTEGER;
+            break;
+        }
+default:
+        c = AMD64_INTEGER;
+        break;
+    }
+    if (off < 16) cls[off/8] = amd64_merge(cls[off/8], c);
+}
+
+int32 amd64_classify(TypeExpr *t, int32 cls[2])
+{   int32 size = sizeoftype(t), n = (size + 7) / 8, i;
+    cls[0] = cls[1] = AMD64_NONE;
+    if (size == 0 || size > 16) return 0;
+    amd64_classify1(t, 0, cls);
+    for (i = 0; i < n; i++)
+    {   if (cls[i] == AMD64_MEMORY) return 0;
+        if (cls[i] == AMD64_NONE) cls[i] = AMD64_INTEGER;   /* padding */
+    }
+    return n;
+}
+
+#endif /* TARGET_HAS_SYSV_AMD64_ABI */
+
 bool returnsstructinregs_t(TypeExpr *t) {
 /* t is known to be a function type, but not necessarily one returning a */
 /* structure value.                                    */
@@ -2016,16 +2130,26 @@ bool returnsstructinregs_t(TypeExpr *t) {
     if (h0_(t) != t_fnap)
         syserr("non fnap in returnsstructinregs_t");
     restype = prunetype(typearg_(t));
+#ifdef TARGET_HAS_SYSV_AMD64_ABI
+    {   int32 cls[2];
+        restype = princtype(restype);
+        return h0_(restype) == s_typespec &&
+               (typespecmap_(restype) & CLASSBITS) &&
+               amd64_classify(restype, cls) != 0;
+    }
+#endif
     if (typefnaux_(t).flags & bitoffnaux_(s_structreg)) {
         int32 resultwords = sizeoftype(restype) / MEMCPYQUANTUM;
-        return (resultwords >= 1 && resultwords <= NARGREGS);
+        return (resultwords >= 1 && resultwords <= NRESULTREGS);
     } else {
 #ifdef SOFTWARE_FLOATING_POINT_RETURNS_DOUBLES_IN_REGISTERS
         if (software_doubles_enabled && isprimtype_(restype, s_double))
             return YES;
 #endif
+#ifndef TARGET_HAS_64BIT_INTREGS
         if (h0_(restype) == s_typespec && int_islonglong_(typespecmap_(restype)))
             return YES;
+#endif
         if (h0_(restype) == s_typespec && (typespecmap_(restype) & CLASSBITS) &&
             sizeoftype(restype) <= 4 && slaveablestruct(typespectagbind_(restype)) == 2)
                 return YES;

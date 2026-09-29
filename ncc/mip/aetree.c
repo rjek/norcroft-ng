@@ -100,6 +100,8 @@ DeclRhsList *mkDeclRhsList(Symstr *sv, TypeExpr *t, SET_BITMAP s)
     p->declstg  = s;  p->declbind = NULL;
     p->fileline.f = NULL; p->fileline.l = 0;
     p->tentative = NULL;
+    p->decltls = NO;
+    p->declconstexpr = NO;
 #ifdef PASCAL /*ECN*/
     p->synflags = 0;
 #endif
@@ -581,6 +583,8 @@ case s_integer:
 case s_ustring:
 #endif
 case s_wstring:
+case s_u16string:
+case s_u32string:
 case s_string:
                 return globalize_string(h0_(e), (String *)e);
 case s_fnapstruct:

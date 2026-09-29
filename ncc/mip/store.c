@@ -263,7 +263,9 @@ VoidStar xglobal_list6(StoreUse t, IPtr a, IPtr b, IPtr c, IPtr d, IPtr e, IPtr 
 /* The argument sizes are in bytes and old is unexamined if oldsize=0.  */
 static VoidStar expand_array(VoidStar oldp, int32 oldsize, int32 newsize)
 {   /* beware the next line if we ever record GlobAlloc's:              */
-    VoidStar newp = PermAlloc(newsize);
+    /* (A table for over SEGSIZE/sizeof(char *) segments -- over 100MB  */
+    /* of store -- must come straight from cc_alloc().)                 */
+    VoidStar newp = newsize > SEGSIZE ? cc_alloc(newsize) : PermAlloc(newsize);
     if (oldsize != 0) memcpy(newp, oldp, (size_t)oldsize);
     trash_block(oldp, oldsize);
     return newp;

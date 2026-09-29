@@ -72,6 +72,10 @@
 #define ULLONG_MAX 0xFFFFFFFFFFFFFFFF
     /* maximum value for an object of type unsigned long long int */
 #endif
+#if __STDC_VERSION__ >= 202311
+#define BITINT_MAXWIDTH 64
+    /* maximum width of an object of type _BitInt or unsigned _BitInt */
+#endif
 
 #endif
 

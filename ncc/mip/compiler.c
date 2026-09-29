@@ -131,6 +131,7 @@ int32 alignof_toplevel_static_var;
 
 int bss_threshold;
 bool disallow_tentative_statics = NO;
+int32 cc_std = STD_C90;
 
 /*
  * Define the following as global, for various debugger back-ends.
@@ -714,6 +715,28 @@ static void set_compile_options(ToolEnv *t)
 #  endif
 #endif
 
+  if ((val = toolenv_lookup(t, ".std")) != NULL && val[0] == '=')
+    cc_std = strtol(&val[1], NULL, 10);
+  /* __STDC_VERSION__ is implied by the language (see tooledit.c), but   */
+  /* unless it has been defined explicitly, it's that of -std in C.      */
+  if (!LanguageIsCPlusPlus && !HasFeature(Feature_PCC) &&
+      StrEq(toolenv_lookup(t, "-D__STDC_VERSION__"), "==199409L")) {
+    static char v[16];
+    sprintf(v, "==%ldL", (long)cc_std);
+    tooledit_insert(t, "-D__STDC_VERSION__", v);
+  }
+  if (!LanguageIsCPlusPlus && !HasFeature(Feature_PCC) && cc_std >= STD_C99) {
+    tooledit_insert(t, "-D__STDC_HOSTED__", "==1");
+    /* The optional features of C11 that aren't provided.                */
+    if (cc_std >= STD_C11) {
+      tooledit_insert(t, "-D__STDC_NO_ATOMICS__", "==1");
+      tooledit_insert(t, "-D__STDC_NO_COMPLEX__", "==1");
+      tooledit_insert(t, "-D__STDC_NO_VLA__", "==1");
+      /* u"" and U"" are UTF-16 and UTF-32.                             */
+      tooledit_insert(t, "-D__STDC_UTF_16__", "==1");
+      tooledit_insert(t, "-D__STDC_UTF_32__", "==1");
+    }
+  }
   toolenv_enumerate(t, SetFeatures, NULL);
   toolenv_enumerate(t, DoPredefine, NULL);
   toolenv_enumerate(t, SetLongForm, NULL);
@@ -1223,10 +1246,15 @@ extern int ccom(ToolEnv *t, char const *infile, char const *outfile,
   set_compile_options(t);
   mcdep_set_options(t);
 
+#ifdef NO_OBJECT_OUTPUT2
+  /* The driver assembles our output itself for "-c" (see driver.c).    */
+  asmfile = outfile;
+#else
   if (toolenv_lookup(t, ".asm_out") != NULL)
     asmfile = outfile;
   else
     objectfile = outfile;
+#endif
 
   if (StrEq(infile, "-"))
   { /* then just leave as stdin */

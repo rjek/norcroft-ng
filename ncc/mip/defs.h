@@ -529,6 +529,15 @@ struct LabBind {
 #define DEDUCED      0x2000000  /* attribute but really to indicate the non-t_unknown
                                    type is deduced rather than by other means.
                                  */
+#define A_BITINT    0x20000000  /* C23: a typedef for _BitInt(N), whose  */
+                                /* width N is its bindaddr_ (see          */
+                                /* bitint_type()).                        */
+#define A_TLS       0x10000000  /* C11: _Thread_local                     */
+#define A_ALIGNAS    0x8000000  /* C11: a typedef whose alignment is (at  */
+                                /* least) its bindaddr_ (see _Alignas).  */
+#define A_EXTDEF     0x4000000  /* C99: an inline function's definition  */
+                                /* must also be an external one (see     */
+                                /* instate_declaration()).               */
 #define A_LOCALSTORE  (~0x7fffffff)
 #define A_GLOBALSTORE 0x40000000
 
@@ -916,6 +925,8 @@ struct DeclRhsList {
                                    function name
                                 */
   TentativeDefn *tentative;
+  bool decltls;                 /* C11's _Thread_local                  */
+  bool declconstexpr;           /* C23's constexpr                      */
 };
 
 #define declbits_(d) ((d)->u.bits)

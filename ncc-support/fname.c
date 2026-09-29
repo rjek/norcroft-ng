@@ -107,7 +107,7 @@ static void unix_fname_parse(const char *file,
 #ifndef COMPILING_ON_RISC_OS
 void fname_parse(const char *fname, const char *suffixlist, UnparsedName *un)
 {
-    return unix_fname_parse(fname, suffixlist, un);
+    unix_fname_parse(fname, suffixlist, un);
 }
 
 int fname_unparse(UnparsedName *un,

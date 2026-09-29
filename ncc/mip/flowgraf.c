@@ -47,6 +47,7 @@
 #include "errors.h"
 #include "sr.h"
 #include "inline.h"     /* Inline_RealUse */
+#include "bind.h"       /* tls_symbol */
 #include "sem.h"
 
 /* AM Sep 88: Use obj_symref before J_ADCON (may kill J_FNCON on day)    */
@@ -315,6 +316,10 @@ Icode *newicodeblock(int32 size)
         }
         prev = p; p = p->next;
     }
+    /* A block can grow beyond a store segment (e.g. when CSE adds its  */
+    /* definitions to a big one), which only the global store allows.   */
+    if (size * (int32)sizeof(Icode) > SEGSIZE)
+        return (Icode *) GlobAlloc(SU_Other, size * sizeof(Icode));
     return (Icode *) BindAlloc(size * sizeof(Icode));
 }
 
@@ -711,12 +716,16 @@ static void expand_jop_macro(const Icode *const icode)
     J_OPCODE newop;
     switch (ic.op & J_TABLE_BITS)
     {
+#ifdef TARGET_HAS_64BIT_INTREGS
+    case J_PUSHR: newop = J_STRLK+J_ALIGN8; goto converted;
+#else
     case J_PUSHR: newop = J_STRK+J_ALIGN4; goto converted;
+#endif
     case J_PUSHD: newop = J_STRDK+J_ALIGN8; goto converted;
     case J_PUSHF: newop = J_STRFK+J_ALIGN4; goto converted;
     case J_PUSHL: newop = J_STRLK+J_ALIGN8; goto converted;
     converted:
-        if ((unsigned32)ic.r3.i < 4*NARGREGS)
+        if ((unsigned32)ic.r3.i < alignof_toplevel_auto*NARGREGS)
             cc_warn(warn_untrustable, currentfunction.symstr); /* syserr() */
         else
 /* @@@ (AM) BEWARE: do not trust this code if NARGREGS>0 since          */
@@ -725,7 +734,7 @@ static void expand_jop_macro(const Icode *const icode)
         {   /* Forge a Binder sufficient for local_base/address.        */
             static Binder forgery;
             bindaddr_(&forgery) = BINDADDR_LOC |
-                                  (greatest_stackdepth - (ic.r3.i - 4*NARGREGS));
+                                  (greatest_stackdepth - (ic.r3.i - alignof_toplevel_auto*NARGREGS));
 /* @@@ "op & ~J_DEADBITS" was innocent effect of old code.  Check?!!    */
 /* Also (only TARGET_STACK_MOVES_ONCE) J_STRK gets no J_ALIGNMENT.      */
 
@@ -816,8 +825,22 @@ case J_LDRFV:case J_STRFV: case J_LDRDV:case J_STRDV:
                 syserr(syserr_remove_noop_failed);
             ic.op = loads_r1(ic.op) ?
                 J_XtoY(ic.op&~J_DEADBITS, J_LDRV, J_LDRK) :
-                J_XtoY(ic.op&~J_DEADBITS, J_STRV, J_STRK) | (ic.op&J_DEAD_R1),
+                J_XtoY(ic.op&~J_DEADBITS, J_STRV, J_STRK) | (ic.op&J_DEAD_R1);
             /* J_ALIGNMENT preserved */
+#ifdef TARGET_HAS_64BIT_INTREGS
+            /* An integer register's binder has a whole register's worth */
+            /* of stack (alignof_toplevel_auto), and may hold a 64-bit    */
+            /* value whatever its type (CSE's are all int).  But a        */
+            /* variable whose address is taken has its own type, and may  */
+            /* be stored to at that width through a pointer, when a wider */
+            /* load would be slow (stopping store to load forwarding).    */
+            if (((ic.op & J_TABLE_BITS) == J_LDRK ||
+                 (ic.op & J_TABLE_BITS) == J_STRK) &&
+                !((bindstg_(bb) & b_addrof) &&
+                  bindmcrep_(bb) != NOMCREPCACHE &&
+                  (bindmcrep_(bb) & MCR_SIZE_MASK) < 8))
+                ic.op = J_XtoY(ic.op & ~J_ALIGNMENT, J_LDRK, J_LDRLK) | J_ALIGN8;
+#endif
             show_mem_inst(ic.op, ic.r1.r, bb);
         }
         return;
@@ -827,8 +850,12 @@ case J_LDRV1:case J_LDRLV1:case J_LDRFV1:case J_LDRDV1:
                 syserr(syserr_remove_noop_failed2);
             if ((bindaddr_(bb) & BINDADDR_MASK)!=BINDADDR_ARG) /* DEAD? */
                 syserr(syserr_bad_bindaddr);
-            ic.op = J_XtoY(ic.op&~J_DEADBITS, J_LDRV1, J_LDRK),
+            ic.op = J_XtoY(ic.op&~J_DEADBITS, J_LDRV1, J_LDRK);
             /* J_ALIGNMENT preserved */
+#ifdef TARGET_HAS_64BIT_INTREGS
+            if ((ic.op & J_TABLE_BITS) == J_LDRK)
+                ic.op = J_XtoY(ic.op & ~J_ALIGNMENT, J_LDRK, J_LDRLK) | J_ALIGN8;
+#endif
             show_mem_inst(ic.op, ic.r1.r, bb);
         }
         return;
@@ -881,7 +908,7 @@ case J_STRING:
  * point.
  */
 case J_ADCOND:
-        {   int32 offset = data.size;
+        {   int32 offset = data_size();
             gendcE(8, ic.r3.f);
             padstatic(alignof_toplevel_static);
             ic.op = J_ADCON;
@@ -891,7 +918,7 @@ case J_ADCOND:
             return;
         }
 case J_ADCONF:
-        {   int32 offset = data.size;
+        {   int32 offset = data_size();
             gendcE(4, ic.r3.f);
             padstatic(alignof_toplevel_static);
             ic.op = J_ADCON;
@@ -907,6 +934,12 @@ case J_ADCON:
         {   Binder *bb = ic.r3.b;
             Symstr *name = bindsym_(bb);
             int32 offset = 0;
+            int32 tls = 0;
+#ifdef TARGET_HAS_TLS
+            if (attributes_(bb) & A_TLS)        /* C11's _Thread_local    */
+                name = tls_symbol(bb), tls = xr_tls;
+            else
+#endif
             {
 #ifdef TARGET_HAS_BSS
                 if ((bindstg_(bb) & u_bss) && bindaddr_(bb) != BINDADDR_UNSET)
@@ -933,7 +966,7 @@ case J_ADCON:
             (void)obj_symref(name, (bindstg_(bb) & b_fnconst ?
                                              xr_code : xr_data) |
                                    (bindstg_(bb) & bitofstg_(s_weak) ?
-                                             xr_weak : 0),
+                                             xr_weak : 0) | tls,
                              0);
 /* The next line of code is probably dying given the obj_symref() above. */
             {
@@ -1934,10 +1967,10 @@ static int32 remove_noops(Icode *c, int32 len)
             /* AM, Nov89: this code is somewhat in flux.                */
             unsigned32 m = bindaddr_(bb) & ~BINDADDR_MASK;
 /* @@@ see health warning in expand_jop_macro() if NARGREGS != 0.       */
-            if (m < 4*NARGREGS)
+            if (m < alignof_toplevel_auto*NARGREGS)
                 cc_warn(warn_untrustable, currentfunction.symstr); /* syserr() */
             bindaddr_(bb) = BINDADDR_LOC |
-                                  (greatest_stackdepth - (m - 4*NARGREGS));
+                                  (greatest_stackdepth - (m - alignof_toplevel_auto*NARGREGS));
         }
     }
 

@@ -29,8 +29,9 @@ int filestat_istty(FILE *fp) {
 
 int filestat_istty(FILE *fp)
 {
+    int fd;
     if (fp == NULL) return 0;
-    int fd = filestat_fileno(fp);
+    fd = filestat_fileno(fp);
     if (fd < 0) return 0;
     return filestat_isatty(fd);
 }

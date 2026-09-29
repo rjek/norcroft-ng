@@ -46,6 +46,12 @@
 
 #define MSG_TOOL_NAME  "armcc"  /* used to load correct NLS message file */
 
+/* __div and __udiv return the remainder too, so x / y and x % y share a call */
+#define TARGET_HAS_DIVREM_FUNCTION 1
+
+/* an overflowing constant is an infinity with a warning, as IEEE has it */
+#define OVERLARGE_FP_CONSTANTS_ARE_INFINITE 1
+
 #endif
 
 /* end of ccmeow/options.h */

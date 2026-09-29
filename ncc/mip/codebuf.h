@@ -37,6 +37,9 @@ typedef enum {
 #ifdef CONST_DATA_IN_CODE
   , DS_Const
 #endif
+#ifdef TARGET_HAS_TLS
+  , DS_Tls                      /* C11's _Thread_local                  */
+#endif
 } DataAreaSort;
 
 #if defined(CALLABLE_COMPILER)
@@ -88,6 +91,11 @@ extern int32 exhandler_size(void);
 extern DataInit *exhandler_head(void);
 extern DataXref *exhandler_xrefs(void);
 extern bool is_exhandler(void);
+#  ifdef TARGET_HAS_TLS
+extern int32 tlsdata_size(void);
+extern DataInit *tlsdata_head(void);
+extern bool is_tlsdata(void);
+#  endif
 #  ifdef CONST_DATA_IN_CODE
 extern int32 constdata_size(void);
 extern DataInit *constdata_head(void);
@@ -224,6 +232,7 @@ extern int32 genfncon(Symstr* sv);
 extern void vg_genstring(StringSegList *s, int32 size, int pad);
 
 extern void padstatic(int32 align);
+extern int32 max_static_align;  /* the largest align given padstatic() */
 
 #ifdef TARGET_HAS_BSS
 extern void padbss(int32 align);
