@@ -2560,7 +2560,7 @@ static Expr *trydiadreduce(Expr *c, SET_BITMAP flag)
       a = b; b = e; fname = revfname;
     }
     { Expr *r = mk1fnap(fname, mkExprList2(a, b));
-#ifdef TARGET_IS_X86    /* (Arm has the bug, but its output is frozen.) */
+#if defined(TARGET_IS_X86) || defined(TARGET_IS_MEOW) /* (Arm has the bug, but its output is frozen.) */
       /* The helpers return long long: give the call the type of the     */
       /* op, so that (e.g.) its unsigned result is shifted as unsigned. */
       if (h0_(r) == s_fnap && !isrelational_(op)) type_(r) = type_(c);
@@ -2714,8 +2714,13 @@ static Expr *trymonadreduce(AEop op, Expr *a, Expr *c, SET_BITMAP flag)
       default:            syserr(syserr_trymonadicreduce, (long)op);
                           fname = NULL;   /* To keep compiler quiet */
       }
-      return MarkError(mk1fnap(fname, mkExprList1(a)),
-                       errorexpr, errormsg);
+      { Expr *r = mk1fnap(fname, mkExprList1(a));
+#if defined(TARGET_IS_X86) || defined(TARGET_IS_MEOW)
+        /* as for the diadic helpers: keep the operand's signedness */
+        if (h0_(r) == s_fnap) type_(r) = type_(c);
+#endif
+        return MarkError(r, errorexpr, errormsg);
+      }
     }
   }
 #endif
