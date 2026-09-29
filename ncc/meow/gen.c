@@ -45,6 +45,7 @@
 #include "errors.h"
 #include "bind.h"
 #include "aeops.h"
+#include "sem.h"
 #include "meow_isa.h"
 
 #define M_ARGREGS       (regbit(R_A1+NARGREGS)-regbit(R_A1))
@@ -652,6 +653,27 @@ static void pool_address(RealRegister rd, int32 disp)
     out_add3(NO, rd, R_IR, 0);
 }
 
+/* Under -zsb, is this symbol's address displaced by __client_sb?  Data
+ * and bss are; code, constdata and anything const are not, nor is a
+ * symbol the compiler knows nothing about, which is a helper's. */
+static bool sb_relative(Symstr *name)
+{
+    Binder *b;
+    TypeExpr *t;
+
+    if (!meow_static_base) return NO;
+    if (name == bindsym_(datasegment) || name == bindsym_(bsssegment)) return YES;
+    if (name == bindsym_(codesegment) || name == bindsym_(constdatasegment)) return NO;
+    b = bind_global_(name);
+    if (b == NULL) return NO;
+    if ((bindstg_(b) & u_constdata) || (binduses_(b) & u_constdata)) return NO;
+    t = princtype(bindtype_(b));
+    if (isfntype(t)) return NO;
+    while (h0_(t) == t_subscript) t = princtype(typearg_(t));
+    if (qualifiersoftype(t) & bitoftype_(s_const)) return NO;
+    return YES;
+}
+
 static void load_adcon(RealRegister rd, Symstr *name, int32 offset)
 {
     int32 i;
@@ -664,6 +686,15 @@ static void load_adcon(RealRegister rd, Symstr *name, int32 offset)
                          LITF_INCODE|LITF_FIRST|LITF_LAST|LITF_NEW);
     }
     load_lit(rd, i);
+    if (sb_relative(name)) {
+        static Symstr *sb_sym;
+
+        if (rd == R_IR) syserr("static base address into ir");
+        if (sb_sym == NULL) sb_sym = sym_insert_id("__client_sb");
+        load_adcon(R_IR, sb_sym, 0);
+        out_mem(NO, R_IR, R_IR, 4, NO, 0);      /* LDR ir, [ir] */
+        out_add3(NO, rd, R_IR, 0);              /* ADD rd, ir */
+    }
 }
 
 /* A double is stored little-endian throughout: low word first, in memory,

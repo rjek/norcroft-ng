@@ -173,3 +173,6 @@ extern bool meow_immed_op(int32 n, int32 op);
 #endif
 
 /* end of meow/target.h */
+
+/* mcdep.c: -zsb, see there */
+extern bool meow_static_base;

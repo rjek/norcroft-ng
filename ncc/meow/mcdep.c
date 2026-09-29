@@ -39,8 +39,17 @@ int mcdep_toolenv_insertdefaults(ToolEnv *t) {
   return 0;
 }
 
+/* -zsb: static data is reached through a displacement held in the word
+ * __client_sb, so that one copy of the code serves many copies of its
+ * data.  Catflap's shared C library is built this way. */
+bool meow_static_base;
+
 bool mcdep_config_option(char name, char const tail[], ToolEnv *t)
-{   IGNORE(name); IGNORE(tail); IGNORE(t);
+{   IGNORE(t);
+    if (name == 's' && StrEq(tail, "b")) {
+        meow_static_base = YES;
+        return YES;
+    }
     return NO;
 }
 
