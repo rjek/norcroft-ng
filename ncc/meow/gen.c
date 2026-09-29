@@ -135,9 +135,19 @@ void cnop(void)
     if (((codebase+codep) & 2) != 0) outHW(NOP_WORD);
 }
 
+/* MOV rd, rs straight after MOV rs, rd copies a value back over itself:
+ * dropped, unless a label was set in between. */
+static int32 last_mov_codep = -1;
+static RealRegister last_mov_rd, last_mov_rs;
+
 static void out_mov(RealRegister rd, RealRegister rs)
 {
-    if (rd != rs) outHW(MEOW_ENCODE_MOV(rd, 0, 0, 0, 0, rs));
+    if (rd == rs) return;
+    if (last_mov_codep == codep - 2 && last_mov_rd == rs && last_mov_rs == rd) return;
+    outHW(MEOW_ENCODE_MOV(rd, 0, 0, 0, 0, rs));
+    last_mov_codep = codep - 2;
+    last_mov_rd = rd;
+    last_mov_rs = rs;
 }
 
 static void out_ldi(int32 v)
@@ -414,12 +424,15 @@ static void setlabel2(LabelNumber *ll, int32 pos)
     label_values = (List3 *)binder_icons3(label_values, pos,
                                          lab_name_(ll) & 0xfffff);
     lab_setloc_(ll, pos | 0x80000000);
+    last_mov_codep = -1;                /* a branch may land here */
 }
 
 /* Patch every reference to l as pointing at codep. */
 static void setlabel1(LabelNumber *l)
 {
     List *p = l->u.frefs;
+
+    last_mov_codep = -1;
 
     while (p) {
         int32 v = car_(p);
@@ -879,6 +892,36 @@ static bool forward_copy(RealRegister rd, RealRegister rs)
     if (!used) return NO;
     fwd_from = rd;
     fwd_to = rs;
+    return YES;
+}
+
+/* MOVK rd, k where the next instruction reads rd for the last time and
+ * its emitter will not touch ir before it does: the constant stays in
+ * ir, where LDI put it, and the MOV into rd goes.  Only the consumers
+ * that form no address and use no scratch qualify. */
+static bool forward_constant(RealRegister rd, int32 k)
+{
+    Icode const *n = cg_next_icode;
+    J_OPCODE nop;
+
+    if (n == NULL || k == 0 || !fits_simm(k, 12)) return NO;
+    nop = n->op & J_TABLE_BITS;
+    switch (nop) {
+    case J_ADDR: case J_SUBR: case J_ANDR: case J_ORRR: case J_EORR:
+        /* rd = r2 op r3 with the constant as r3, and rd not r3 */
+        if (register_number(n->r3.r) != rd || register_number(n->r1.r) == rd) return NO;
+        break;
+    case J_CMPR:
+        break;
+    case J_STRK: case J_STRBK: case J_STRWK:
+        /* the value stored, at an offset that needs no address forming */
+        if (register_number(n->r1.r) != rd || n->r3.i != 0) return NO;
+        break;
+    default:
+        return NO;
+    }
+    if (!forward_copy(rd, R_IR)) return NO;
+    out_ldi(k);
     return YES;
 }
 
@@ -1608,6 +1651,7 @@ case J_BXX:
         case_entry((LabelNumber *)m);
         break;
 case J_MOVK:
+        if (forward_constant(r1, mi)) break;
         load_integer(r1, mi);
         break;
 case J_MOVR:
