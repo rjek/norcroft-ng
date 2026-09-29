@@ -764,6 +764,11 @@ case s_typespec:
                     break;
                 }
                 case bitoftype_(s_typedefname):
+                    /* A _BitInt's initialiser must be converted to it   */
+                    /* (not just its container).                         */
+                    if (einit == 0 && bitint_width(t) != 0 &&
+                        syn_canrdinit())
+                        einit = rdinit(t, whole, 0);
                     initsubstatic(bindtype_(typespecbind_(t)),
                                   whole, aligned, einit);
                     break;

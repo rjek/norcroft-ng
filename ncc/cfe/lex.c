@@ -129,6 +129,7 @@ static unsigned32 lexclass[1+255];
 #define NUM_SHORT  bitoftype_(s_short)
 #define NUM_UNSIGN bitoftype_(s_unsigned)
 #define NUM_LONGLONG bitoftype_(s_longlong)
+#define NUM_BITINT bitoftype_(s_typedefname)    /* C23's wb suffix      */
 #define NUM_CHAR   (LanguageIsCPlusPlus ? bitoftype_(s_char) : NUM_INT)
                            /* Type of 'a' is int in C, char in C++.     */
 
@@ -213,6 +214,26 @@ static AEop make_integer(int32 radix, int32 flag)
         cc_err(lex_err_ioverflow_64, namebuf);
         overflow_warned = YES;
     }
+    if (flag & NUM_BITINT)
+    {   /* C23: a _BitInt of the least width that holds the value, as  */
+        /* an s_int64con with the width in curlex.a2.flag (see syn.c).  */
+        bool isunsigned = (flag & NUM_UNSIGN) != 0;
+        int32 n = 0;
+        uint32 hi = val64.hi, lo = val64.lo;
+        while (hi != 0) n++, hi >>= 1;
+        if (n != 0) n += 32;
+        else while (lo != 0) n++, lo >>= 1;
+        if (!isunsigned) n++;
+        if (n < (isunsigned ? 1 : 2)) n = isunsigned ? 1 : 2;
+        if (n > BITINT_MAXWIDTH)
+        {   if (!overflow_warned) cc_err(lex_err_ioverflow_64, namebuf);
+            n = BITINT_MAXWIDTH;
+        }
+        curlex.a1.i64 = mkint64const(ts_longlong | (flag & NUM_UNSIGN),
+                                     (int64 *)&val64);
+        curlex.a2.flag = n;
+        return s_int64con;
+    }
 
 /* Now modify 'flag' (if necessary) to get a type for the constant.     */
     /* ANSI rules (bracketted cases cannot happen if int==long):
@@ -258,6 +279,7 @@ static AEop make_integer(int32 radix, int32 flag)
                 cc_warn(lex_warn_force_ulonglong, namebuf, namebuf);
         }
         curlex.a1.i64 = mkint64const(flag ^ (NUM_LONGLONG|NUM_SHORT|NUM_LONG), (int64 *)&val64);
+        curlex.a2.flag = 0;             /* not a _BitInt                */
         return s_int64con;
     }
 
@@ -487,7 +509,7 @@ static AEop read_number(int radix)
     if (flag & NUM_FLOAT) return make_floating(namebuf,flag);
     for (;;)
     {
-        if (curchar == 'l' || curchar == 'L') {
+        if ((curchar == 'l' || curchar == 'L') && !(flag & NUM_BITINT)) {
             if (!HasFeature(Feature_Fussy) && (flag & NUM_LONG)) {
                 flag ^= NUM_LONG|NUM_LONGLONG; nextchar(); continue;
             } else if (!(flag & (NUM_LONGLONG|NUM_LONG))) {
@@ -496,6 +518,16 @@ static AEop read_number(int radix)
         }
         if ((curchar == 'u' || curchar == 'U') && !(flag & NUM_UNSIGN))
         {   flag |= NUM_UNSIGN; nextchar(); continue;
+        }
+        if ((curchar == 'w' || curchar == 'W') && CStd(STD_C23) &&
+            !(flag & (NUM_BITINT|NUM_LONG|NUM_LONGLONG)))
+        {   int w = curchar;
+            nextchar();
+            if (curchar == (w == 'w' ? 'b' : 'B'))
+            {   flag |= NUM_BITINT; nextchar(); continue;
+            }
+            if (curchar == PP_EOF || !(lexclass_(curchar) & l_idcont))
+                cc_ansi_rerr(lex_rerr_pp_number);   /* (else see below) */
         }
         lex_check_pp_number();
         return make_integer(radix, flag);
@@ -1417,6 +1449,7 @@ void lex_init()         /* C version  */
         { "typeof_unqual", s_typeof_unqual, STD_C23 },
         { "nullptr",  s_nullptr, STD_C23 },
         { "constexpr", s_constexpr, STD_C23 },
+        { "_BitInt",  s_bitint,  STD_C23 },
         { "_Generic", s_generic, STD_C11 }
     };
     static const struct keyword ns3[] = {

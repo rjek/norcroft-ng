@@ -403,6 +403,7 @@ typedef enum AE_op {
     s_typeof_unqual,
     s_nullptr,
     s_constexpr,
+    s_bitint,           /* C23's _BitInt */
     s_SPARE1,
     s_SPARE2,
 

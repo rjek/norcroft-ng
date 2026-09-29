@@ -768,6 +768,7 @@ static bool isexprstarter(AEop op)
     (isdeclstarter_(curlex.sym) || curlex.sym == s_alignas || \
      curlex.sym == s_thread_local || curlex.sym == s_typeofc23 || \
      curlex.sym == s_typeof_unqual || curlex.sym == s_constexpr || \
+     curlex.sym == s_bitint || \
      (curlex.sym & ~s_qualified) == s_identifier && curlex_typename != 0)
 
 /* Ditto for isdeclstarter3_() which is currently rather a placeholder. */
@@ -1010,7 +1011,8 @@ case s_generic:     /* C11's _Generic ( expr , type : expr , ... )       */
                 Expr *e;
                 checkfor_ket(s_colon);
                 e = rd_expr(UPTOCOMMA);
-                if (chosen == NULL && qualfree_equivtype(ct, t)) chosen = e;
+                if (chosen == NULL && qualfree_equivtype(ct, t) &&
+                    bitint_width(ct) == bitint_width(t)) chosen = e;
             }
             if (curlex.sym != s_comma) break;
             nextsym();
@@ -1136,6 +1138,9 @@ case s_floatcon:
         break;
 case s_int64con:
         a = (Expr *)curlex.a1.i64;
+        if (curlex.a2.flag != 0)        /* C23: a _BitInt of that width */
+            a = mkcast(s_cast, a, bitint_type(curlex.a2.flag,
+                                   (int64map_(a) & bitoftype_(s_unsigned)) != 0));
         nextsym();
         break;
 case s_true:
@@ -2826,6 +2831,25 @@ static TypeExpr *rd_typeof(AEop op)
     return t;
 }
 
+/* C23's _BitInt ( constant-expression ), returning the width (after   */
+/* an error, the widest).                                               */
+static int32 rd_bitint_width(void)
+{   int32 n = BITINT_MAXWIDTH;
+    Expr *e;
+    nextsym();
+    checkfor_ket(s_lpar);
+    e = optimise0(mkintegral(s_bitint, rd_expr(PASTCOMMA)));
+    if (e != NULL && h0_(e) == s_integer &&
+        intval_(e) > 0 && intval_(e) <= BITINT_MAXWIDTH)
+        n = intval_(e);
+    else if (e != NULL && h0_(e) == s_integer)
+        cc_rerr(syn_rerr_bitint_width, (long)intval_(e));
+    else
+        cc_rerr(syn_rerr_bitint_const);
+    checkfor_ket(s_rpar);
+    return n;
+}
+
 /* C11's _Alignas ( type-name | constant-expression ), returning the     */
 /* alignment (or 0).                                                    */
 static int32 rd_alignas(void)
@@ -2904,10 +2928,21 @@ static DeclSpec rd_declspec(int declflag,
       /* opaque could be handled as a typebit but I don't since it's    */
       /* kept only in tag binders and the error handling is different   */
 
-    int32 alignas = 0;
+    int32 alignas = 0, bitint = 0;
     bool tls = NO, constexpr = NO;
     for (;;)
     {   AEop s = curlex.sym;
+        if (s == s_bitint)              /* C23                           */
+        {   int32 n = rd_bitint_width();
+            if (bitint != 0)
+                cc_rerr(syn_rerr_repeated_bitint);
+            else if (typesseen & ~(CVBITS|bitoftype_(s_signed)|
+                                   bitoftype_(s_unsigned)))
+                cc_err(syn_err_typeclash, s_bitint, typesseen & ~CVBITS);
+            else
+                bitint = n;
+            continue;
+        }
         if (s == s_alignas)             /* C11                           */
         {   int32 a = rd_alignas();
             if (a > alignas) alignas = a;
@@ -2942,7 +2977,7 @@ static DeclSpec rd_declspec(int declflag,
         if (!isdeclstarter_(s))
         {   int scope_level = 0;
             /* A typedef may be possible, else break from loop...       */
-            if (typesseen & ~CVBITS) break;
+            if (typesseen & ~CVBITS || bitint != 0) break;
             if (template_formals)
                 scope_level = push_var_scope(template_formals, Scope_TemplateArgs);
             rd_type_name();
@@ -3421,6 +3456,20 @@ than annoying.  Probably we don't understand the reason for it.
             ds.tls = tls;
             ds.constexpr = constexpr;
             return ds;
+        }
+    }
+    if (bitint != 0)
+    {   /* as if a typedef of the _BitInt type were used                 */
+        if (typesseen & ~(CVBITS|bitoftype_(s_signed)|bitoftype_(s_unsigned)))
+            cc_err(syn_err_typeclash, s_bitint, typesseen & ~CVBITS);
+        else
+        {   bool isunsigned = (typesseen & bitoftype_(s_unsigned)) != 0;
+            if (bitint < (isunsigned ? 1 : 2))
+            {   cc_rerr(syn_rerr_bitint_width, (long)bitint);
+                bitint = isunsigned ? 1 : 2;
+            }
+            b = typespecbind_(bitint_type(bitint, isunsigned));
+            typesseen = (typesseen & CVBITS) | bitoftype_(s_typedefname);
         }
     }
     if (typedefquals & typesseen)

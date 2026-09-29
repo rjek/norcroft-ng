@@ -233,6 +233,7 @@ extern int32 rtcheck;
 #define STD_C11 201112L
 #define STD_C17 201710L
 #define STD_C23 202311L
+#define BITINT_MAXWIDTH 64           /* the widest C23 _BitInt */
 extern int32 cc_std;
 #define CStd(v) (!LanguageIsCPlusPlus && cc_std >= (v))
 

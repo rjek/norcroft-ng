@@ -529,6 +529,9 @@ struct LabBind {
 #define DEDUCED      0x2000000  /* attribute but really to indicate the non-t_unknown
                                    type is deduced rather than by other means.
                                  */
+#define A_BITINT    0x20000000  /* C23: a typedef for _BitInt(N), whose  */
+                                /* width N is its bindaddr_ (see          */
+                                /* bitint_type()).                        */
 #define A_TLS       0x10000000  /* C11: _Thread_local                     */
 #define A_ALIGNAS    0x8000000  /* C11: a typedef whose alignment is (at  */
                                 /* least) its bindaddr_ (see _Alignas).  */
