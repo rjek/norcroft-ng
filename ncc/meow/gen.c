@@ -667,11 +667,18 @@ static bool sb_relative(Symstr *name)
     b = bind_global_(name);
     if (b == NULL) return NO;
     if ((bindstg_(b) & u_constdata) || (binduses_(b) & u_constdata)) return NO;
-    t = princtype(bindtype_(b));
-    if (isfntype(t)) return NO;
-    while (h0_(t) == t_subscript) t = princtype(typearg_(t));
-    if (qualifiersoftype(t) & bitoftype_(s_const)) return NO;
-    return YES;
+    /* const on the object, on an element type, or on a typedef along
+     * the way, puts it in ROM; princtype would drop the typedef's */
+    for (t = bindtype_(b);;) {
+        if (h0_(t) == s_typespec) {
+            if (typespecmap_(t) & bitoftype_(s_const)) return NO;
+            if (isprimtype_(t, s_typedefname)) { t = bindtype_(typespecbind_(t)); continue; }
+            return YES;
+        }
+        if (h0_(t) == t_subscript) { t = typearg_(t); continue; }
+        if (isfntype(t)) return NO;
+        return YES;                     /* a pointer: the pointer itself is data */
+    }
 }
 
 static void load_adcon(RealRegister rd, Symstr *name, int32 offset)
