@@ -207,14 +207,15 @@ void RealRegisterUse(Icode const *ic, RealRegUse *u)
             break;
         case J_MOVC:
         case J_CLRC:
-            c_out = regbit(R_IP);       /* block copies count through at */
+            /* block copies count through at, so no operand may live there */
+            c_in = c_out = regbit(R_IP);
             break;
         case J_LDRK: case J_LDRWK: case J_STRK: case J_STRWK:
         case J_LDRR: case J_LDRWR: case J_STRR: case J_STRWR:
             /* a packed access is done a byte at a time through at */
             if ((ic->op & J_ALIGNMENT) == J_ALIGN1 &&
                 (ic->op & J_BASEALIGN4) == 0)
-                c_out = regbit(R_IP);
+                c_in = c_out = regbit(R_IP);
             break;
         default:
             break;
