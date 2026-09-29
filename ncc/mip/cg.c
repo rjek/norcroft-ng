@@ -5556,6 +5556,7 @@ static bool SimpleTest(Expr const *test) {
     /* (x) has already been turned into (x != 0) */
 }
 
+#ifdef TARGET_WANTS_STRENGTH_REDUCTION
 /* ---- strength reduction of array indexing in for loops ----------------- */
 /* for (init; test; v = v + c) with addresses A + v * K in the body, where  */
 /* A and c do not change in the loop, gets a pointer per distinct (A, K)   */
@@ -6123,6 +6124,7 @@ static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *bo
     }
     return bl;
 }
+#endif /* TARGET_WANTS_STRENGTH_REDUCTION */
 
 static void cg_loop(Expr *init, Expr *pretest, Expr *step, Cmd *body,
                     Expr *posttest)

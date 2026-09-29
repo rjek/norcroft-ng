@@ -680,6 +680,48 @@ static void load_string(RealRegister rd, StringSegList *s, int32 extra)
     pool_address(rd, disp + extra);
 }
 
+/* ---- copies that the next instruction can do without ---------------------- */
+
+/* MOV rd, rs followed by an instruction that reads rd for the last time
+ * and does not write it: the reader uses rs instead and the copy goes. */
+static RealRegister fwd_from = NoRegister, fwd_to;
+
+static bool forward_copy(RealRegister rd, RealRegister rs)
+{
+    Icode const *n = cg_next_icode;
+    J_OPCODE nop;
+    bool used = NO;
+
+    if (n == NULL || rd == rs) return NO;
+    nop = n->op & J_TABLE_BITS;
+    switch (nop) {
+    case J_CALLK: case J_CALLR: case J_OPSYSK: case J_MOVC: case J_CLRC:
+    case J_CASEBRANCH: case J_LABEL: case J_B: case J_ENDPROC: case J_ENTER:
+    case J_PUSHM: case J_SETSP: case J_SETSPENV:
+        return NO;
+    default:
+        break;
+    }
+    if (loads_r1(nop) && register_number(n->r1.r) == rd) return NO;
+    if (loads_r2(nop) && register_number(n->r2.r) == rd) return NO;
+    if (reads_r1(nop) && register_number(n->r1.r) == rd) {
+        if ((n->op & J_DEAD_R1) == 0) return NO;
+        used = YES;
+    }
+    if (reads_r2(nop) && register_number(n->r2.r) == rd) {
+        if ((n->op & J_DEAD_R2) == 0) return NO;
+        used = YES;
+    }
+    if (reads_r3(nop) && register_number(n->r3.r) == rd) {
+        if ((n->op & J_DEAD_R3) == 0) return NO;
+        used = YES;
+    }
+    if (!used) return NO;
+    fwd_from = rd;
+    fwd_to = rs;
+    return YES;
+}
+
 /* ---- 64-bit helpers done in line ---------------------------------------- */
 
 /* A MOVK into a3 just before a call is the shift count of a 64-bit shift;
@@ -1121,6 +1163,7 @@ static void block_op(RealRegister rd, RealRegister rs, int32 n, int size)
 /* ---- case tables ------------------------------------------------------- */
 
 static RealRegister case_reg = NoRegister;
+static bool case_reg_dead;
 
 static void casebranch(RealRegister r1, int32 m)
 {
@@ -1147,11 +1190,13 @@ static void case_entry(LabelNumber *dest)
         if (!lab_isset_(dest)) return_pending = YES;
     }
     if (case_reg != NoRegister) {
+        RealRegister t = case_reg_dead ? case_reg : R_IP;
+
         branch_to(C_CS, dest);
-        out_mov(R_IP, case_reg);
-        out_shift(R_IP, NO, YES, NO, 1);
-        out_add8(NO, R_IP, 2);
-        out_add3(NO, R_PC, R_IP, 0);
+        if (t != case_reg) out_mov(t, case_reg);
+        out_shift(t, NO, YES, NO, 1);
+        out_add8(NO, t, 2);
+        out_add3(NO, R_PC, t, 0);
         case_reg = NoRegister;
         return;
     }
@@ -1286,6 +1331,12 @@ static void show_instruction_1(const Icode *const ic)
         skip_next = NO;
         return;                         /* already done by the previous one */
     }
+    if (fwd_from != NoRegister) {
+        if (reads_r1(op1) && r1 == fwd_from) r1 = fwd_to;
+        if (reads_r2(op1) && r2 == fwd_from) r2 = fwd_to;
+        if (reads_r3(op1) && mr == fwd_from) mr = fwd_to;
+        fwd_from = NoRegister;
+    }
     if (op1 != J_BXX) {
         in_table = NO;
         case_reg = NoRegister;
@@ -1319,6 +1370,7 @@ case J_B:
             branch_to(cond_of_q(q), (LabelNumber *)m);
         break;
 case J_CASEBRANCH:
+        case_reg_dead = (ic->op & J_DEAD_R1) != 0;
         casebranch(r1, mi);
         break;
 case J_BXX:
@@ -1328,6 +1380,7 @@ case J_MOVK:
         load_integer(r1, mi);
         break;
 case J_MOVR:
+        if (forward_copy(r1, mr)) break;
         out_mov(r1, mr);
         break;
 case J_NEGR:
