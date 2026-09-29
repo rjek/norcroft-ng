@@ -213,6 +213,7 @@ static void cg_condjump(J_OPCODE op,Expr *a1,Expr *a2,RegSort rsort,J_OPCODE con
 static void emituse(VRegnum r,RegSort rsort);
 static VRegnum load_integer_structure(Expr *e);
 static Binder *gentempvar(TypeExpr *t, VRegnum r);
+static bool cg_autoinline(bool ellipsis);
 static void cg_cond1(Expr *e, bool valneeded, VRegnum targetreg,
                      LabelNumber *l3, bool structload);
 
@@ -5517,8 +5518,11 @@ static VRegnum open_compilable(Expr **xp, RegSort rsort, bool valneeded)
         return R_A1; /* /* Resultregister wanted here? */
     }
 
-    if ((bindstg_(exb_(fname)) & bitofstg_(s_inline)) &&
-        !(var_cc_private_flags & 8192L)) {
+    if (((bindstg_(exb_(fname)) & bitofstg_(s_inline))
+#ifdef TARGET_AUTO_INLINE
+         || Inline_IsAutomatic(exb_(fname))         /* see cg_autoinline() */
+#endif
+        ) && !(var_cc_private_flags & 8192L)) {
         Expr *structresult = NULL;
         ExprList *args = exprfnargs_(x);
         if (returnsstructinregs_t(bindtype_(exb_(fname))))
@@ -6940,22 +6944,58 @@ void cg_topdecl(TopDecl *x, FileLine fl)
                                       xr_code+xr_defloc : xr_code+xr_defext;
 
             correct_addrof(local_binders, regvar_binders);
-            if ( !(bindstg_(b) & bitofstg_(s_inline)) ||
-                 usrdbg(DBG_ANY) ||
+            {   bool isinline = (bindstg_(b) & bitofstg_(s_inline)) != 0;
+                bool saved = NO;
+                if ((isinline || cg_autoinline(x->v_f.fn.ellipsis)) &&
+                    !usrdbg(DBG_ANY)
 #ifdef TARGET_HAS_SYSV_AMD64_ABI
-                 /* The inliner knows neither about rewritten formals    */
-                 /* nor about struct results in registers.               */
-                 amd64_formalschanged ||
+                    /* The inliner knows neither about rewritten formals */
+                    /* nor about struct results in registers.            */
+                    && !amd64_formalschanged
 #endif
-                 !Inline_Save(b, local_binders, regvar_binders)) {
-
-                cg_topdecl2(local_binders, regvar_binders);
-                symext_(currentfunction.symstr)->usedregs = regmaskvec;
+                   )
+                    saved = Inline_Save(b, local_binders, regvar_binders);
+                /* A function saved for inlining is only compiled out of   */
+                /* line if it turns out to be needed (see Inline_Tidy()),  */
+                /* but one inlined automatically that is external needs    */
+                /* it anyway, so compile it now, keeping functions in order. */
+                if (saved && !isinline)
+                {   bool emit = (currentfunction.xrflags & xr_defext) != 0;
+                    Inline_Automatic(b, emit);
+                    if (emit) saved = NO;
+                }
+                if (!saved) {
+                    cg_topdecl2(local_binders, regvar_binders);
+                    symext_(currentfunction.symstr)->usedregs = regmaskvec;
+                }
             }
             /* enable profile option, if necessary */
             if (old_profile_option)
                 var_profile_option = old_profile_option;
         }
+}
+
+/* Whether the function just compiled (but not declared inline) should  */
+/* be saved for inlining, as a target may ask for those of up to        */
+/* TARGET_AUTO_INLINE jopcodes to be (twice that if optimising for      */
+/* time, and none if optimising for space).                             */
+static bool cg_autoinline(bool ellipsis)
+{
+#ifdef TARGET_AUTO_INLINE
+    BlockHead *p;
+    int32 n = 0, limit = TARGET_AUTO_INLINE;
+    /* __builtin_va_start and setjmp need a function of their own.      */
+    if (ellipsis || (config & CONFIG_OPTIMISE_SPACE) ||
+        (procflags & BLKSETJMP))
+        return NO;
+    if (config & CONFIG_OPTIMISE_TIME) limit *= 2;
+    for (p = top_block; p != NULL; p = blkdown_(p))
+        if ((n += blklength_(p)) > limit) return NO;
+    return YES;
+#else
+    IGNORE(ellipsis);
+    return NO;
+#endif
 }
 
 void cg_init(void)

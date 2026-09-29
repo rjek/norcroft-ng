@@ -88,6 +88,12 @@ Inline_SavedFn *Inline_FindFn(Binder *b);
 
 bool Inline_Save(Binder *b, BindList *local_binders, BindList *regvar_binders);
 
+/* Note that saved function b was not declared inline, but saved to be  */
+/* inlined anyway, and whether its out-of-line copy has been compiled.   */
+void Inline_Automatic(Binder *b, bool emitted);
+
+bool Inline_IsAutomatic(Binder *b);
+
 #if defined(CALLABLE_COMPILER)
 #define Inline_RealUse(b)               ((void)0)
 #else

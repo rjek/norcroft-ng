@@ -444,12 +444,16 @@ static void gen_epilogue(void)
         insz2("mov", 4, op_mem(FPREG, -1, 0, 8), HW(X86_EAX));
     }
 #endif
-    insz2("lea", WORD, op_mem(FPREG, -1, 0, -WORD*nsaved), HW(SPREG));
-    x86_insns_tail->frame = YES;
-    for (i = NSAVEDREGS; --i >= 0; )
-        if (function_saves(savedregs[i]))
-            insz1("pop", WORD, RW(savedregs[i]));
-    insz1("pop", WORD, HW(FPREG));
+    if (nsaved == 0)
+        ins0("leave");          /* mov %rbp, %rsp; pop %rbp           */
+    else
+    {   insz2("lea", WORD, op_mem(FPREG, -1, 0, -WORD*nsaved), HW(SPREG));
+        x86_insns_tail->frame = YES;
+        for (i = NSAVEDREGS; --i >= 0; )
+            if (function_saves(savedregs[i]))
+                insz1("pop", WORD, RW(savedregs[i]));
+        insz1("pop", WORD, HW(FPREG));
+    }
     x86_insns_tail->frame = YES;
 #ifndef TARGET_IS_X86_64
     /* The callee pops the hidden struct-result pointer.              */
@@ -483,6 +487,121 @@ static void omit_frame(void)
     }
     for (p = x86_insns; p != NULL; p = p->next)
         if (p->frame) p->kind = XI_DELETED;
+}
+
+/* ---------------------------------------------------------------- */
+/* Peephole optimisation                                              */
+/* ---------------------------------------------------------------- */
+
+static X86Ins *next_ins(X86Ins *p)
+{   do p = p->next; while (p != NULL && p->kind == XI_DELETED);
+    return p;
+}
+
+static bool mnem_is(X86Ins const *p, char const *m)
+{   return p->kind == XI_INSN && p->mnem != NULL && StrEq(p->mnem, m);
+}
+
+static bool is_reg(X86Op const *o, int size)
+{   return o->kind == XO_REG && o->size == size;
+}
+
+/* Whether the flags are dead after p: whether, on the way from p to   */
+/* a return, a call or an instruction that sets all of them, nothing   */
+/* reads them.  Only the instructions gen.c makes need be known about, */
+/* and any other (or a jump, which isn't followed) is taken to.        */
+static bool flags_dead_after(X86Ins *p)
+{   static char const *const setters[] = {
+        "add", "sub", "and", "or", "xor", "cmp", "test", "neg", "imul",
+        "div", "idiv", "ucomiss", "ucomisd", "call", "ret", "leave"
+    };
+    static char const *const neutral[] = {
+        "mov", "movzbl", "movzwl", "movsbl", "movswl", "movslq", "movsd",
+        "movss", "movaps", "movd", "lea", "push", "pop", "not", "cltd",
+        "cqto", "xorps", "xorpd", "addsd", "addss", "subsd", "subss",
+        "mulsd", "mulss", "divsd", "divss", "cvtsi2sd", "cvtsi2ss",
+        "cvtss2sd", "cvtsd2ss", "cvttsd2si", "cvttss2si", "rep movsb",
+        "rep movsl", "rep movsq", "rep stosb", "rep stosl", "rep stosq"
+    };
+    unsigned i;
+    while ((p = next_ins(p)) != NULL)
+    {   if (p->kind == XI_LABEL) continue;
+        if (p->kind != XI_INSN || p->mnem == NULL) return NO;
+        for (i = 0; i < sizeof(setters)/sizeof(setters[0]); i++)
+            if (StrEq(p->mnem, setters[i])) return YES;
+        /* A shift by %cl leaves the flags alone if cl is 0.           */
+        if ((StrEq(p->mnem, "shl") || StrEq(p->mnem, "shr") ||
+             StrEq(p->mnem, "sar")) && p->op[0].kind == XO_IMM)
+            return p->op[0].disp != 0;
+        for (i = 0; i < sizeof(neutral)/sizeof(neutral[0]); i++)
+            if (StrEq(p->mnem, neutral[i])) break;
+        if (i == sizeof(neutral)/sizeof(neutral[0])) return NO;
+    }
+    return NO;
+}
+
+static void peephole(void)
+{   X86Ins *p, *q;
+    for (p = x86_insns; p != NULL; p = next_ins(p))
+    {   if (!mnem_is(p, "mov") || p->nops != 2) continue;
+        /* mov $0, r -> xor r, r (which is shorter, and breaks any     */
+        /* dependency on r) if the flags it sets aren't wanted.         */
+        if (p->op[0].kind == XO_IMM && p->op[0].disp == 0 &&
+            p->op[0].sym == NULL && p->op[1].kind == XO_REG &&
+            (p->size == 4 || p->size == 8) && flags_dead_after(p))
+        {   p->mnem = "xor", p->size = 4;
+            p->op[1].size = 4, p->op[0] = p->op[1];
+            continue;
+        }
+        /* mov a, b; mov b, a: the second is redundant.  (Not for      */
+        /* narrower moves, which zero-extend on x86-64.)                */
+        q = next_ins(p);
+        if (q != NULL && mnem_is(q, "mov") && q->nops == 2 && !q->frame &&
+            p->size == WORD && q->size == WORD &&
+            is_reg(&p->op[0], WORD) && is_reg(&p->op[1], WORD) &&
+            is_reg(&q->op[0], WORD) && is_reg(&q->op[1], WORD) &&
+            q->op[0].reg == p->op[1].reg && q->op[1].reg == p->op[0].reg)
+            q->kind = XI_DELETED;
+    }
+}
+
+/* Align the heads of loops, the targets of backward jumps, to 32      */
+/* bytes if that takes no more than 15 bytes of padding, so that how   */
+/* fast a small loop runs depends less on where it happens to fall.    */
+typedef struct PassedLabel {
+    struct PassedLabel *next;
+    X86Ins *ins;                /* NULL once aligned                    */
+} PassedLabel;
+
+#define NPASSED 64
+
+static void align_loops(void)
+{   PassedLabel *passed[NPASSED], *l;
+    X86Ins *p;
+    memclr(passed, sizeof(passed));
+    for (p = x86_insns; p != NULL; p = p->next)
+    {   if (p->kind == XI_LABEL)
+        {   PassedLabel **h = &passed[p->op[0].disp & (NPASSED-1)];
+            l = (PassedLabel *)SynAlloc(sizeof(PassedLabel));
+            l->next = *h, l->ins = p, *h = l;
+        }
+        else if (p->kind == XI_INSN && p->mnem[0] == 'j' && p->nops == 1 &&
+                 p->op[0].kind == XO_LAB)
+        {   int32 lab = p->op[0].disp;
+            for (l = passed[lab & (NPASSED-1)]; l != NULL; l = l->next)
+                if (l->ins != NULL && l->ins->op[0].disp == lab)
+                {   /* Turn the label into the directive, followed by a  */
+                    /* copy of the label.                                */
+                    X86Ins *q = (X86Ins *)SynAlloc(sizeof(X86Ins));
+                    *q = *l->ins;
+                    l->ins->kind = XI_DIRECTIVE;
+                    l->ins->mnem = "\t.p2align\t5,,15";
+                    l->ins->nops = 0, l->ins->next = q;
+                    l->ins = NULL;
+                    break;
+                }
+        }
+    }
 }
 
 /* ---------------------------------------------------------------- */
@@ -920,6 +1039,8 @@ void show_instruction(Icode const *const ic)
             gen_epilogue();
         }
         omit_frame();
+        peephole();
+        align_loops();
         return;
 
     case J_LABEL:
@@ -1092,7 +1213,12 @@ void show_instruction(Icode const *const ic)
     case J_ORRR: commutative_rr("or", ic);  return;
     case J_EORR: commutative_rr("xor", ic); return;
     case J_MULK:
-        insz3("imul", isz, op_imm(m), R(r2), R(r1));
+        if (m == 1 && isz == WORD)
+            movr(r1, r2);
+        else if (m == 1)                /* (zero-extending)            */
+            insz2("mov", isz, R(r2), R(r1));
+        else
+            insz3("imul", isz, op_imm(m), R(r2), R(r1));
         return;
     case J_MULR:
         commutative_rr("imul", ic);

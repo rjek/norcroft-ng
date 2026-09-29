@@ -82,6 +82,7 @@ struct SavedFnList {
 
 #define ol_used 1
 #define ol_emitted 2
+#define ol_automatic 4
 
 typedef struct BindListIndex BindListIndex;
 struct BindListIndex {
@@ -112,6 +113,20 @@ Inline_SavedFn *Inline_FindFn(Binder *b) {
   if (fn != NULL)
     return &fn->fn;
   return NULL;
+}
+
+/* Called for any function (whose binder's inlineinfo may, in C++, share */
+/* its store with something else), so look for it among the saved ones. */
+bool Inline_IsAutomatic(Binder *b) {
+  SavedFnList *p, *fn = (SavedFnList *)bindinline_(b);
+  for (p = saved_fns; p != NULL; p = cdr_(p))
+    if (p == fn) return (p->outoflineflags & ol_automatic) != 0;
+  return NO;
+}
+
+void Inline_Automatic(Binder *b, bool emitted) {
+  SavedFnList *fn = (SavedFnList *)bindinline_(b);
+  if (fn != NULL) fn->outoflineflags |= emitted ? ol_automatic+ol_emitted : ol_automatic;
 }
 
 void Inline_RealUse(Binder *b) {

@@ -89,6 +89,10 @@
 /* __builtin_va_start makes a va_list that describes them.               */
 #define TARGET_HAS_SYSV_VA_START        1
 
+/* Functions of up to this many jopcodes are inlined (see cg.c); -Otime  */
+/* doubles it, and -Ospace inlines none.  (i386 has too few registers.)  */
+#define TARGET_AUTO_INLINE              64
+
 /* Structs of up to 16 bytes are passed and returned in registers, as    */
 /* the psABI says, and others in memory.  mip returns them in integer    */
 /* registers rax and r10 (internal 6 and 7), and gen.c moves them to and */
