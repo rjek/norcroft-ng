@@ -4,7 +4,7 @@
  * SPDX-Licence-Identifier: Apache-2.0
  *
  * -S output in mas syntax.  The code buffer is disassembled, so what is
- * written is exactly what an object writer would produce.
+ * written is exactly what obj.c puts in an object.
  */
 
 #include <errno.h>

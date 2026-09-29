@@ -22,7 +22,7 @@ cannot alter your program to avoid this failure, please contact your supplier\n"
 #define obj_err_common "repeated common block $r"
 #define obj_err_common1 "common block $r too small"
 #define obj_err_common2 "common block $r too large"
-#define obj_fatalerr_noobj "object output is not supported for MEOW; use -S and assemble with mas"
+#define syserr_obj_codereloc "obj_codereloc %lx"
 
 #endif                          /* ndef NLS - syserrs are not tags */
 

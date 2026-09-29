@@ -338,7 +338,7 @@ SUPPORT_SRCS += \
 endif
 
 ifeq ($(BACKEND),meow)
-SUPPORT_SRCS += ncc-support/disass-meow.c ncc-support/meow_isa.c
+SUPPORT_SRCS += ncc-support/disass-meow.c ncc-support/meow_isa.c ncc-support/melf.c
 endif
 
 ifeq ($(BACKEND),thumb)
