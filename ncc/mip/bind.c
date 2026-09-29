@@ -767,7 +767,7 @@ if (!(flags & FB_NOTYET))
             if (membits_(l) != 0) {
                 if (target_lsbitfirst) {
                     int32 maxsize = MAXBITSIZE;
-                    if (int_islonglong_(typespecmap_(memtype_(l)))) maxsize = sizeof_longlong*8;
+                    if (int_is64bit_(typespecmap_(memtype_(l)))) maxsize = 64;
                     n = (membits_(l)+memboff_(l)) % maxsize;
                     if (n != 0) n = maxsize - n;
                 } else

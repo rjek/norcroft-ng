@@ -1,7 +1,6 @@
 // Bitfield layout.
 // RUN: %cc %s -o %t && %t
 // REQUIRES: i386, i386-run
-// KNOWN-FAIL: a bitfield after a non-bitfield member does not share its storage unit as the i386 ABI requires
 
 int printf(const char *, ...);
 struct a { char c; int d : 5; int e : 3; };

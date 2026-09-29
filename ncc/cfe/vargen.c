@@ -317,6 +317,32 @@ static int32 rd_bitinit(TypeExpr *t, int32 size)
 /* One day it might be nice to compare the value read with size...      */
 }
 
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+/* With System V bitfields (see structfield() in sem.c), bitfields are  */
+/* initialised a byte at a time (for a little-endian target allocating  */
+/* them from the least significant bit): bytes [from, to) of the struct  */
+/* hold a run of them.                                                   */
+typedef struct { unsigned8 *b; int32 from, to; } BitfieldBytes;
+
+/* Read the initialiser for the bitfield of type t and k bits at bit    */
+/* pos of the struct.                                                    */
+static void bf_deposit(BitfieldBytes *bf, TypeExpr *t, int32 pos, int32 k)
+{   /* (The value may be wider than the field, as for an assignment.)   */
+    Int64Con *ic = int64_of_init(rdinit(unbitfield_type(t), 0, 0));
+    unsigned32 lo = ic->bin.i.lo, hi = (unsigned32)ic->bin.i.hi;
+    int32 i;
+    for (i = 0; i < k; i++)
+        if ((i < 32 ? lo >> i : hi >> (i - 32)) & 1)
+            bf->b[(pos + i) / 8] |= (unsigned8)(1 << ((pos + i) % 8));
+}
+
+static void bf_flush(BitfieldBytes *bf)
+{   int32 i;
+    for (i = bf->from; i < bf->to; i++) gendcI(1, bf->b[i]);
+    bf->b = NULL;
+}
+#endif
+
 /**************************************************************************
       oo          oo     Problem: This code is tailored to putting string
       o\\  ____  //o     literals in the read only code area, thus it handles
@@ -466,6 +492,7 @@ static void genpointer(Expr *einit)
     }
 }
 
+#ifndef TARGET_HAS_SYSV_BITFIELDS
 static void initbitfield(unsigned32 bfval, int32 bfsize, bool pad_to_int)
 {
     int32 j;
@@ -482,6 +509,7 @@ static void initbitfield(unsigned32 bfval, int32 bfsize, bool pad_to_int)
             gendcI(1, bfval >> 24), bfval <<= 8;
     if (pad_to_int) padstatic(alignof_int);
 }
+#endif
 
 /* NB. this MUST be kept in step with sizeoftype and findfield (q.v.) */
 static void initsubstatic(TypeExpr *t, Binder *whole, bool aligned, Expr *einit)
@@ -572,6 +600,11 @@ case s_typespec:
                     ClassMember *l;
                     int32 bfsize, bfval, k, woffset;
                     bool is_union = ((m & -m) == bitoftype_(s_union));
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                    BitfieldBytes bf;
+                    int32 bfbytes = 0;
+                    bf.b = NULL;
+#endif
                     (void)sizeofclass(b, NULL);
                     if (!(tagbindbits_(b) & TB_DEFD))
                         cc_err(vargen_err_undefined_struct, b);
@@ -586,6 +619,22 @@ case s_typespec:
                         if (isbitfield_type(memtype_(l)))
                         {   if (is_union && memsv_(l) == NULL) continue;
                             k = membits_(l);
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                            {   int32 pos = 8*memwoff_(l) + memboff_(l);
+                                if (bf.b == NULL)
+                                {   int32 size = sizeoftype(t);
+                                    bf.b = (unsigned8 *)SynAlloc(size);
+                                    memclr(bf.b, size);
+                                    bf.from = bf.to = woffset;
+                                }
+                                /* ANSI 3rd draft says unnamed bitfields */
+                                /* never consume initialisers.           */
+                                if (memsv_(l) != NULL && k != 0)
+                                    bf_deposit(&bf, memtype_(l), pos, k);
+                                if ((pos + k + 7) / 8 > bf.to)
+                                    bf.to = (pos + k + 7) / 8;
+                            }
+#else
                             if (bfsize == 0)
                             {   while (woffset < memwoff_(l))
                                 {   gendcI(1, 0);
@@ -612,14 +661,23 @@ case s_typespec:
                                     bfval |= rd_bitinit(memtype_(l), k)
                                                 << leftshift;
                             }
+#endif
                         }
                         else
-                        {   if (bfsize != 0)
+                        {
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                            if (bf.b != NULL)
+                            {   bf_flush(&bf);
+                                woffset = bf.to;
+                            }
+#else
+                            if (bfsize != 0)
                             {   int32 align = memwoff_(l) & -memwoff_(l);
                                 initbitfield(bfval, bfsize, 0);
                                 padstatic(align > alignof_int ? alignof_int : align);
                                 bfsize = bfval = 0;
                             }
+#endif
                             if (!(tagbindbits_(b) & TB_UNALIGNED))
                             {   padstatic(alignof_member);
                                 padstatic(alignoftype(memtype_(l)));
@@ -638,10 +696,21 @@ case s_typespec:
                         /* only the 1st field of a union can be initialised */
                         if (is_union) break;
                       }
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                    if (bf.b != NULL)
+                    {   bf_flush(&bf);
+                        woffset = bfbytes = bf.to;
+                    }
+                    if (is_union)
+                        gendc0(sizeoftype(t) - (l==0 ? 0 : /* empty union!! */
+                             isbitfield_type(memtype_(l)) ? bfbytes :
+                                                            sizeoftype(memtype_(l))));
+#else
                     if (bfsize) initbitfield(bfval, bfsize, is_union);
                     if (is_union)
                         gendc0(sizeoftype(t) - (l==0 ? 0 : /* empty union!! */
                              bfsize ? sizeof_int : sizeoftype(memtype_(l))));
+#endif
                     /* See sem.c(sizeoftype) -- check this agrees   */
                     else
                         if (bfsize == 0 && woffset == 0)

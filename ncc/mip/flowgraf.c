@@ -315,6 +315,10 @@ Icode *newicodeblock(int32 size)
         }
         prev = p; p = p->next;
     }
+    /* A block can grow beyond a store segment (e.g. when CSE adds its  */
+    /* definitions to a big one), which only the global store allows.   */
+    if (size * (int32)sizeof(Icode) > SEGSIZE)
+        return (Icode *) GlobAlloc(SU_Other, size * sizeof(Icode));
     return (Icode *) BindAlloc(size * sizeof(Icode));
 }
 

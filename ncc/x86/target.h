@@ -192,8 +192,10 @@
 
 #endif /* TARGET_IS_X86_64 */
 
-/* System V: structs are only as aligned as their members.            */
+/* System V: structs are only as aligned as their members, and          */
+/* bitfields are laid out as the ABIs say (see structfield()).          */
 #define alignof_struct  1
+#define TARGET_HAS_SYSV_BITFIELDS       1
 
 #define target_lib_name_(x,e) (e)
 extern char *target_asm_options(ToolEnv *);

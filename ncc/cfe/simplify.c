@@ -330,6 +330,22 @@ static Expr *RemovableSignOrZeroExtension(Expr *a, uint32 mask) {
    in case s_addrof requires it to be idempotent.
 */
 
+/* Whether t is a 64-bit integer type, whose expressions the rewrites   */
+/* here that work with 32-bit constants, masks and shift counts must    */
+/* leave alone (with TARGET_HAS_64BIT_INTREGS).  Pointers are excluded, */
+/* as their constant offsets are small.                                 */
+static bool is64bitint(TypeExpr *t)
+{
+#ifdef TARGET_HAS_64BIT_INTREGS
+    t = princtype(t);
+    return h0_(t) == s_typespec && int_is64bit_(typespecmap_(t)) &&
+           !(typespecmap_(t) & bitoftype_(s_double));
+#else
+    IGNORE(t);
+    return NO;
+#endif
+}
+
 static Expr *EvalBinaryOp(AEop op, TypeExpr *t, Expr *e1, Expr *e2) {
 /* e1 and e2 known to be of sort s_integer. This is not a call to mkbinary()
  * because that may generate unwanted warnings about overflow. Also, we would
@@ -403,6 +419,9 @@ static Expr *optimise1b(Expr *e, Expr *a1, Expr *a2,
         else if (is_same(a21, a22))
           return DistributedOp(h0_(a1), op, type_(e), a21, a11, a12, valneeded);
       }
+    /* The rewrites below of integer expressions with constants work in */
+    /* 32 bits.                                                         */
+    if (is64bitint(te)) goto symmetric_done;
     if (op == s_minus) {
       if (is_fpzero(a1)) { h0_(e) = s_neg; arg1_(e) = a2; return e; }
       if (is_fpzero(a2)) return a1;
@@ -1355,7 +1374,7 @@ static Expr *optimise1(Expr *e, bool valneeded, bool *pure)
                   break;
                 }
               }
-              if (n == 0) {
+              if (n == 0 && !is64bitint(typeofexpr(a1))) {
                 a1 = IgnoreSignednessChange(a1);
                 if (h0_(a1) == s_and && h0_(arg2_(a1)) == s_integer) {
                 /* This is meant to improve comparisons of (unsigned) bitfields
@@ -1429,7 +1448,8 @@ static Expr *optimise1(Expr *e, bool valneeded, bool *pure)
                 intval_(e0r) += intval_(arg2_(e0l));
                 e0l = arg1_(e) = arg1_(e0l);
             }
-            if (op == s_leftshift && h0_(e0r) == s_integer) {
+            if (op == s_leftshift && h0_(e0r) == s_integer &&
+                !is64bitint(type_(e))) {
               if (h0_(e0l) == s_and && h0_(e1r = arg2_(e0l)) == s_integer) {
                 e1l = arg1_(e0l);
                 op2 = h0_(e1l);

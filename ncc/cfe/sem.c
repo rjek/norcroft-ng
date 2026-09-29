@@ -286,6 +286,8 @@ TypeExpr *unbitfield_type(TypeExpr *t)
                      primtype2_(m & ~BITFIELD, typespectagbind_(t))
                    : int_islonglong_(m) ?
                      te_llint
+                   : int_is64bit_(m) ?
+                     te_lint
                    : te_int;
     }
     syserr(syserr_unbitfield, t);
@@ -477,7 +479,14 @@ static int32 alignofclass(TagBinder *b)
 /* Note we can safely treat bit field members as non-bit field members.   */
         for (; l != 0; l = memcdr_(l))
             if (is_datamember_(l))
+            {
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+                /* Unnamed bitfields don't affect a struct's alignment.   */
+                if (memsv_(l) == NULL && isbitfield_type(memtype_(l)))
+                    continue;
+#endif
                 n = max(n, alignoftype(memtype_(l)));
+            }
     }
     return n;
 }
@@ -584,6 +593,38 @@ bool structfield(ClassMember *l, int32 sort, StructPos *p)
     p->padded = NO;
     if (!is_datamember_(l)) return NO;
     /*if (istypevar(te)) { p->woffset = 0; return YES; }*/
+#ifdef TARGET_HAS_SYSV_BITFIELDS
+    if (isbitfield_type(te) && !HasFeature(Feature_ReverseBitfields))
+    {   /* As the System V ABIs (and pcc) have it, a bitfield is placed at */
+        /* the next bit (even after a non-bitfield member), unless it      */
+        /* would then cross a boundary of an object of its type, aligned   */
+        /* as that type is in a struct, when it starts at the next such    */
+        /* boundary.  A zero-width bitfield moves to the next boundary.    */
+        /* The field is described by the offset of the container that      */
+        /* accesses will load (an int, or for a 64-bit type the aligned     */
+        /* 64-bit object including the field if there is one, and          */
+        /* otherwise the aligned int) and its bit offset within that.      */
+        int32 k = membits_(l);
+        int32 size = 8 * sizeofintegraltype(te, typespecmap_(te));
+        int32 align = 8 * alignoftype(te);
+        int32 pos = 8*n + bitoff, unit;
+        if (k == 0 || (pos % align) + k > size)
+        {   int32 oldpos = pos;
+            pos = padsize(pos, align);
+            if (pos != oldpos) p->padded = YES;
+        }
+        unit = size > MAXBITSIZE && pos / size == (pos + k - 1) / size ?
+                   size : MAXBITSIZE;
+        p->woffset = (pos / unit) * (unit / 8);
+        p->boffset = pos - 8 * p->woffset;
+        p->bsize = k, p->typesize = 0;
+        if (sort != bitoftype_(s_union)) pos += k;
+        p->n = (pos / MAXBITSIZE) * (MAXBITSIZE / 8);
+        p->bitoff = pos - 8 * p->n;
+        p->endofcontainer = (pos + 7) / 8;      /* the last byte used     */
+        return YES;
+    }
+#endif
     if (isbitfield_type(te))
     {   /* Bitfields are packed into objects having the type of the member */
         /* (for enumerations, the type of the enumeration's container).    */
@@ -3095,7 +3136,7 @@ retry:  switch h0_(e)
 static int32 bf_container_bits(TypeExpr *t)
 {   SET_BITMAP m = typespecmap_(t);
     if (m & bitoftype_(s_char))  return 8;
-    if (int_islonglong_(m)) return 8 * sizeof_longlong;
+    if (int_is64bit_(m)) return 64;
 #ifdef TARGET_LACKS_HALFWORD_STORE
     if (target_lacks_halfword_store) return MAXBITSIZE;
 #endif
@@ -3110,7 +3151,8 @@ static Expr *bf_container(Expr *e, SET_BITMAP m)
     {   int32 maxsize = bf_container_bits(type_(e));
         if (maxsize >= MAXBITSIZE)
             return mk_exprwdot(s_dot,
-                           mkqualifiedtype(int_islonglong_(m) ? te_llint : te_int,
+                           mkqualifiedtype(int_islonglong_(m) ? te_llint :
+                                           int_is64bit_(m) ? te_lint : te_int,
                                            m & QUALIFIER_MASK),
                            arg1_(e), exprdotoff_(e));
         else {
@@ -3612,7 +3654,7 @@ static Expr *OtherBitsMask(int32 size, int32 maxsize, int32 lspos) {
         I64_LSBMask(&n, size);
         I64_Lsh(&n, &n, lspos);
         I64_Not(&n, &n);
-        return (Expr *)mkint64const(ts_longlong, &n);
+        return mkint64result(te_llint, ts_longlong, &n, 0);
     }
 }
 
@@ -3622,7 +3664,7 @@ static Expr *LSBMask(int32 size, int32 maxsize) {
     else {
         int64 n;
         I64_LSBMask(&n, size);
-        return (Expr *)mkint64const(ts_longlong, &n);
+        return mkint64result(te_llint, ts_longlong, &n, 0);
     }
 }
 
@@ -3641,14 +3683,14 @@ static Expr *bitfieldvalue(Expr *ebf, SET_BITMAP m, Expr *ewd)
     int32 size = exprbsize_(ebf);
     int32 maxsize = bf_container_bits(type_(ebf));
     TypeExpr *tr = bf_promotedtype(type_(ebf), size);
-    int32 maxbitsize = int_islonglong_(m) ? sizeof_longlong*8 : sizeof_int*8;
+    int32 maxbitsize = int_is64bit_(m) ? 64 : sizeof_int*8;
 /* AM @@@ There is work to be done (e.g. in the next line) so that we   */
 /* choose signed/unsigned enum bit fields depending on set of values?   */
 /* Currently enum bit fields act as plain int (i.e. may/maynot extend). */
     Expr *e;
     if (issignedchar_(m)) {
         e = mkshift(s_rightshift,
-              mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + ((sizeof_int / (maxsize/8)) - 1) * maxsize),
+              mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + (maxbitsize / maxsize - 1) * maxsize),
               maxbitsize-size);
     } else if
 #ifdef TARGET_HAS_SCALED_OPS
@@ -3664,13 +3706,13 @@ static Expr *bitfieldvalue(Expr *ebf, SET_BITMAP m, Expr *ewd)
 #endif
     {   if ((exprmsboff_(ebf) % maxsize) == 0) {
             e = mkshift(s_rightshift,
-                  mkcast(s_cast, ewd, int_islonglong_(m) ? te_ullint : te_uint),
+                  mkcast(s_cast, ewd, int_is64bit_(m) ? te_ullint : te_uint),
                   maxsize-size);
         } else {
             e = mkshift(s_rightshift,
                   mkcast(s_cast,
                     mkshift(s_leftshift, ewd, (exprmsboff_(ebf) % maxsize) + (maxbitsize / maxsize - 1) * maxsize),
-                    int_islonglong_(m) ? te_ullint : te_uint),
+                    int_is64bit_(m) ? te_ullint : te_uint),
                   maxbitsize-size);
         }
     } else if (size == maxsize) {
@@ -3710,7 +3752,7 @@ static Expr *bitfieldstuff(AEop op, Expr *a, SET_BITMAP m,
                      bitfieldvalue(a, m, ewd),
                      b);
     return bitfieldinsert(op == s_postinc ? s_displace : s_assign,
-                          a, ewd, mkcast(op, bb, int_islonglong_(m) ? te_llint : te_int));
+                          a, ewd, mkcast(op, bb, int_is64bit_(m) ? te_llint : te_int));
 }
 
 static Expr *bitfieldassign(AEop op, Expr *a, TypeExpr *ta, Expr *b)
@@ -3728,14 +3770,45 @@ static Expr *bitfieldassign(AEop op, Expr *a, TypeExpr *ta, Expr *b)
     }
     m = typespecmap_(ta);
     bitword = bf_container(a, m);
+#ifndef TARGET_HAS_64BIT_INTREGS
+    /* The old value of a long long container from s_displace can't be  */
+    /* taken apart, as the calls of _ll_and() etc which would do so     */
+    /* need its address, so x.f++ is done as (t = x.f, x.f = t+1, t).   */
+    if (op == s_postinc && int_islonglong_(m))
+    {   Binder *gen = NULL, *old;
+        Expr *bw = bitword, *v;
+        if (!issimplelvalue(a))
+        {   gen = gentempbinder(ptrtotype_(typeofexpr(bitword)));
+            bw = mkunary(s_content, (Expr *)gen);
+        }
+        v = bitfieldvalue(a, m, bw);
+        if (h0_(v) == s_error) return errornode;
+        old = gentempbinder(type_(v));
+        r = mklet(old, type_(v),
+              mkbinary(s_comma,
+                mkbinary(s_assign, (Expr *)old, v),
+                mkbinary(s_comma,
+                  bitfieldstuff(s_assign, a, m, bw,
+                                mkbinary(s_plus, (Expr *)old, b)),
+                  (Expr *)old)));
+        if (gen != NULL)
+            r = mklet(gen, type_(v),
+                  mkbinary(s_comma,
+                    mkbinary(s_assign, (Expr *)gen, mkunary(s_addrof, bitword)),
+                    r));
+        if (h0_(r) == s_error) return errornode;
+        return mkinvisible(type_(r), mk_expr2(op, ta, a, b), r);
+    }
+#endif
 /* @@@ AM: the expression (x.b = 1) where x.b has bitfield type here    */
 /* has promoted type of x.b, maybe it shouldn't (e.g. sizeof).          */
     if (issimplelvalue(a))
         r = bitfieldvalue(a, m, bitfieldstuff(op, a, m, bitword, b));
     else
     {   Binder *gen = gentempbinder(ptrtotype_(typeofexpr(bitword)));
+        /* (The value is the container, which may be 64 bits.)          */
         r = bitfieldvalue(a, m,
-            mklet(gen, te_int,
+            mklet(gen, int_is64bit_(m) ? typeofexpr(bitword) : te_int,
                 mkbinary(s_comma,
                     mkbinary(s_assign, (Expr *)gen, mkunary(s_addrof,bitword)),
                     bitfieldstuff(op, a, m,

@@ -1,7 +1,6 @@
 // Bitfield layout.
 // RUN: %cc %s -o %t && %t
 // REQUIRES: x86_64, x86_64-run
-// KNOWN-FAIL: a bitfield after a non-bitfield member does not share its storage unit as the psABI requires
 
 int printf(const char *, ...);
 struct a { char c; int d : 5; int e : 3; };
