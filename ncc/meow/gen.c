@@ -679,6 +679,165 @@ static void load_string(RealRegister rd, StringSegList *s, int32 extra)
     pool_address(rd, disp + extra);
 }
 
+/* ---- 64-bit helpers done in line ---------------------------------------- */
+
+/* A MOVK into a3 just before a call is the shift count of a 64-bit shift;
+ * remembering it lets the shift be done in line. */
+static bool a3_known;
+static int32 a3_value;
+
+static void note_a3(J_OPCODE op1, RealRegister r1, RealRegister r2, int32 mi)
+{
+    if (op1 == J_MOVK && r1 == R_A1 + 2) {
+        a3_known = YES;
+        a3_value = mi;
+    } else if (op1 == J_LABEL || op1 == J_CALLK || op1 == J_CALLR ||
+               op1 == J_OPSYSK || op1 == J_MOVC || op1 == J_CLRC ||
+               (loads_r1(op1) && r1 == R_A1 + 2) ||
+               (loads_r2(op1) && r2 == R_A1 + 2)) {
+        a3_known = NO;
+    }
+}
+
+static bool is_ll(Symstr *name, Expr *fn)
+{
+    return name == bindsym_(exb_(fn));
+}
+
+/* a1:a2 op= a3:a4 for and, or, eor */
+static void ll_bitop(int op)
+{
+    out_bitr(R_A1, op, NO, R_A1 + 2);
+    out_bitr(R_A1 + 1, op, NO, R_A1 + 3);
+}
+
+/* a1:a2 <<= n, >>= n, with n a constant */
+static void ll_shift(int32 n, bool left, bool arith)
+{
+    RealRegister lo = R_A1, hi = R_A1 + 1;
+
+    n &= 63;
+    if (n == 0) return;
+    if (n >= 32) {
+        if (left) {
+            out_mov(hi, lo);
+            if (n > 32) out_shift(hi, NO, YES, NO, n - 32);
+            out_bitr(lo, 3, NO, lo);
+        } else {
+            out_mov(lo, hi);
+            if (n > 32) out_shift(lo, arith, NO, NO, n - 32);
+            if (arith) out_shift(hi, YES, NO, NO, 31);
+            else out_bitr(hi, 3, NO, hi);
+        }
+        return;
+    }
+    if (left) {
+        out_shift(hi, NO, YES, NO, n);
+        out_mov(R_IR, lo);
+        out_shift(R_IR, NO, NO, NO, 32 - n);
+        out_bitr(hi, 2, NO, R_IR);
+        out_shift(lo, NO, YES, NO, n);
+    } else {
+        out_shift(lo, NO, NO, NO, n);
+        out_mov(R_IR, hi);
+        out_shift(R_IR, NO, YES, NO, 32 - n);
+        out_bitr(lo, 2, NO, R_IR);
+        out_shift(hi, arith, NO, NO, n);
+    }
+}
+
+/* The next instruction only tests a1 against zero: an equality compare
+ * can then leave any nonzero value for "differs". */
+static bool result_only_tested(void)
+{
+    Icode const *n = cg_next_icode;
+
+    return n != NULL && (n->op & J_TABLE_BITS) == J_CMPK &&
+           register_number(n->r2.r) == R_A1 && n->r3.i == 0 &&
+           (n->op & J_DEAD_R2) != 0;
+}
+
+static bool inline_ll(Symstr *name)
+{
+    LabelNumber *l;
+
+    if (is_ll(name, sim.lland)) { ll_bitop(1); return YES; }
+    if (is_ll(name, sim.llor)) { ll_bitop(2); return YES; }
+    if (is_ll(name, sim.lleor)) { ll_bitop(3); return YES; }
+    if (is_ll(name, sim.llnot)) {
+        out_bitr(R_A1, 0, NO, R_A1);
+        out_bitr(R_A1 + 1, 0, NO, R_A1 + 1);
+        return YES;
+    }
+    if (is_ll(name, sim.lltol)) return YES;
+    if (is_ll(name, sim.llfromu)) {
+        out_bitr(R_A1 + 1, 3, NO, R_A1 + 1);
+        return YES;
+    }
+    if (is_ll(name, sim.llfroml)) {
+        out_mov(R_A1 + 1, R_A1);
+        out_shift(R_A1 + 1, YES, NO, NO, 31);
+        return YES;
+    }
+    if (is_ll(name, sim.lladd)) {
+        out_add3(NO, R_A1, R_A1 + 2, 0);
+        out_cmpr(R_A1, R_A1 + 2);      /* carry: the sum came out below an operand */
+        l = nextlabel();
+        branch_to(C_CS, l);
+        out_add8(NO, R_A1 + 1, 1);
+        setlabel(l);
+        out_add3(NO, R_A1 + 1, R_A1 + 3, 0);
+        return YES;
+    }
+    if (is_ll(name, sim.llsub) || is_ll(name, sim.llrsb)) {
+        RealRegister alo = R_A1, ahi = R_A1 + 1, blo = R_A1 + 2, bhi = R_A1 + 3;
+
+        if (is_ll(name, sim.llrsb)) {   /* b - a: compute into b's registers */
+            out_cmpr(blo, alo);
+            out_add3(YES, blo, alo, 0);
+            out_add3(YES, bhi, ahi, 0);
+            l = nextlabel();
+            branch_to(C_CS, l);
+            out_add8(YES, bhi, 1);
+            setlabel(l);
+            out_mov(alo, blo);
+            out_mov(ahi, bhi);
+            return YES;
+        }
+        out_cmpr(alo, blo);
+        out_add3(YES, alo, blo, 0);
+        out_add3(YES, ahi, bhi, 0);
+        l = nextlabel();
+        branch_to(C_CS, l);
+        out_add8(YES, ahi, 1);
+        setlabel(l);
+        return YES;
+    }
+    if (is_ll(name, sim.llneg)) {
+        out_bitr(R_A1, 0, NO, R_A1);
+        out_bitr(R_A1 + 1, 0, NO, R_A1 + 1);
+        out_add8(NO, R_A1, 1);
+        out_cmpk(R_A1, 0);
+        l = nextlabel();
+        branch_to(C_NE, l);
+        out_add8(NO, R_A1 + 1, 1);
+        setlabel(l);
+        return YES;
+    }
+    if (a3_known && (is_ll(name, sim.llshiftl) || is_ll(name, sim.llushiftr) ||
+                     is_ll(name, sim.llsshiftr))) {
+        ll_shift(a3_value, is_ll(name, sim.llshiftl), is_ll(name, sim.llsshiftr));
+        return YES;
+    }
+    if (is_ll(name, sim.llcmpne) && result_only_tested()) {
+        /* nonzero iff they differ, which is all the test that follows wants */
+        ll_bitop(3);
+        out_bitr(R_A1, 2, NO, R_A1 + 1);
+        return YES;
+    }
+    return NO;
+}
+
 /* ---- calls ------------------------------------------------------------- */
 
 static void call_k(Symstr *name)
@@ -1101,7 +1260,17 @@ static void rr_op(int which, RealRegister rd, RealRegister rs, RealRegister rm)
     }
 }
 
+static void show_instruction_1(const Icode *const ic);
+
 void show_instruction(const Icode *const ic)
+{
+    J_OPCODE op1 = ic->op & J_TABLE_BITS;
+
+    show_instruction_1(ic);
+    note_a3(op1, ic->r1.rr, ic->r2.rr, (int32)ic->r3.i);
+}
+
+static void show_instruction_1(const Icode *const ic)
 {
     J_OPCODE op = ic->op & ~J_DEADBITS;
     J_OPCODE op1 = op & J_TABLE_BITS;
@@ -1247,7 +1416,7 @@ case J_STRR: case J_STRBR: case J_STRWR:
         }
         break;
 case J_CALLK:
-        call_k((Symstr *)m);
+        if (!inline_ll((Symstr *)m)) call_k((Symstr *)m);
         break;
 case J_CALLR:
         call_r(mr);
