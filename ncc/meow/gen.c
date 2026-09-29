@@ -837,27 +837,34 @@ static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
 
 /* MOVC: *rd = *rs for n bytes; CLRC: rs is NoRegister.  Both address
  * registers are advanced, which corrupts_r1/r2 report. */
+/* MOVC and CLRC.  rd survives (the middle end may still want it), rs does
+ * not.  Short blocks are unrolled through at; long ones copy backwards so
+ * the loop can end by comparing at with rd, there being no spare register
+ * for a count. */
 static void block_op(RealRegister rd, RealRegister rs, int32 n, int size)
 {
     int32 count = n / size;
     LabelNumber *loop;
 
     if (count == 0) return;
+    out_mov(R_IP, rd);
+    if (count > 8) {
+        add_integer(R_IP, R_IP, n);
+        if (rs != NoRegister) add_integer(rs, rs, n);
+    }
     if (rs == NoRegister) out_bitr(R_IR, 3, NO, R_IR);
-    if (count <= 4) {
+    if (count <= 8) {
         while (count-- > 0) {
             if (rs != NoRegister) out_mem(NO, R_IR, rs, size, NO, 3);
-            out_mem(YES, R_IR, rd, size, NO, 3);
+            out_mem(YES, R_IR, R_IP, size, NO, 3);
         }
         return;
     }
-    load_integer(R_IP, count);
     loop = nextlabel();
     setlabel(loop);
-    if (rs != NoRegister) out_mem(NO, R_IR, rs, size, NO, 3);
-    out_mem(YES, R_IR, rd, size, NO, 3);
-    out_add8(YES, R_IP, 1);
-    out_cmpk(R_IP, 0);
+    if (rs != NoRegister) out_mem(NO, R_IR, rs, size, NO, 1);
+    out_mem(YES, R_IR, R_IP, size, NO, 1);
+    out_cmpr(R_IP, rd);
     branch_to(C_NE, loop);
 }
 
@@ -906,21 +913,21 @@ static void case_entry(LabelNumber *dest)
 static int cond_of_q(int32 q)
 {
     switch (q & ~Q_UBIT) {
-    case Q_EQ: return C_EQ;
-    case Q_NE: return C_NE;
-    case Q_HS: return C_CS;
-    case Q_LO: return C_CC;
-    case Q_MI: return C_MI;
-    case Q_PL: return C_PL;
-    case Q_VS: return C_VS;
-    case Q_VC: return C_VC;
-    case Q_HI: return C_HI;
-    case Q_LS: return C_LS;
-    case Q_GE: return C_GE;
-    case Q_LT: return C_LT;
-    case Q_GT: return C_GT;
-    case Q_LE: return C_LE;
-    case Q_AL: return C_AL;
+    case Q_EQ & ~Q_UBIT: return C_EQ;
+    case Q_NE & ~Q_UBIT: return C_NE;
+    case Q_HS & ~Q_UBIT: return C_CS;
+    case Q_LO & ~Q_UBIT: return C_CC;
+    case Q_MI & ~Q_UBIT: return C_MI;
+    case Q_PL & ~Q_UBIT: return C_PL;
+    case Q_VS & ~Q_UBIT: return C_VS;
+    case Q_VC & ~Q_UBIT: return C_VC;
+    case Q_HI & ~Q_UBIT: return C_HI;
+    case Q_LS & ~Q_UBIT: return C_LS;
+    case Q_GE & ~Q_UBIT: return C_GE;
+    case Q_LT & ~Q_UBIT: return C_LT;
+    case Q_GT & ~Q_UBIT: return C_GT;
+    case Q_LE & ~Q_UBIT: return C_LE;
+    case Q_AL & ~Q_UBIT: return C_AL;
     default:
         syserr("condition %lx", (long)q);
         return C_AL;

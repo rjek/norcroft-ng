@@ -102,8 +102,8 @@ bool has_side_effects(Icode const *ic)
 }
 
 bool corrupts_r1(Icode const *ic)
-{   J_OPCODE op = ic->op & J_TABLE_BITS;
-    return op == J_MOVC || op == J_CLRC;
+{   IGNORE(ic);
+    return NO;
 }
 
 bool corrupts_r2(Icode const *ic)

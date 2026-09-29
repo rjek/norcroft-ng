@@ -45,6 +45,8 @@
 #define TARGET_HAS_HALFWORD_INSTRUCTIONS 1
 #define TARGET_HAS_BSS  1
 #define CONST_DATA_IN_CODE 1
+/* Without this the CSE pass does not know a MOVC reads its source. */
+#define TARGET_HAS_BLOCKMOVE 1
 
 /* Every ALU instruction reads and writes its first operand, so tell the
  * register allocator to try to make r1 and r2 the same register. */

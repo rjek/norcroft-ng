@@ -667,7 +667,10 @@ void builtin_init(void)
 #endif
 #endif
 #ifdef TARGET_HAS_DIV_10_FUNCTION
-#if defined(TARGET_IS_ARM_OR_THUMB) && !defined(OBSOLETE_ARM_NAMES)
+#if defined(TARGET_IS_MEOW)
+    sim.div10fn = library_function("__div10", 1, 1, PUREBIT);
+    sim.udiv10fn = library_function("__udiv10", 1, 1, PUREBIT);
+#elif defined(TARGET_IS_ARM_OR_THUMB) && !defined(OBSOLETE_ARM_NAMES)
     sim.div10fn = library_function(TARGET_PREFIX("__rt_sdiv10"), 1, 1, PUREBIT);
     sim.udiv10fn = library_function(TARGET_PREFIX("__rt_udiv10"), 1, 1, PUREBIT);
 #else
