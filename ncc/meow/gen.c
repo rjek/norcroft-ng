@@ -496,14 +496,42 @@ static int32 label_pos(LabelNumber *l)
     return l->u.defn & 0x00ffffff;
 }
 
-/* LDI #d; ADD pc, ir  to a set label. */
+/* A jump to a set label as ir = displacement; ADD pc, ir.  Within LDI's
+ * reach that is two instructions; beyond it the displacement is built
+ * in ir, and since pc is the ADD's own address the displacement depends
+ * on the length of what builds it, which settles in a pass or two.
+ * Returns the length in instructions, emitting nothing when emit is NO. */
+static int long_jump0(LabelNumber *dest, bool emit)
+{
+    int32 target = label_pos(dest);
+    int32 d = target - (codep + 2);
+    int n, m, i;
+
+    if (d >= -2048 && d <= 2047) {
+        if (emit) {
+            out_ldi(d);
+            out_add3(NO, R_PC, R_IR, 0);
+        }
+        return 2;
+    }
+    n = load_integer0(R_IR, d, NO);
+    for (i = 0; i < 4; i++) {
+        d = target - (codep + 2 * n);
+        m = load_integer0(R_IR, d, NO);
+        if (m == n) break;
+        n = m;
+    }
+    if (m != n) syserr(syserr_displacement, (long)d);
+    if (emit) {
+        load_integer(R_IR, d);
+        out_add3(NO, R_PC, R_IR, 0);
+    }
+    return n + 1;
+}
+
 static void long_jump(LabelNumber *dest)
 {
-    int32 d = label_pos(dest) - (codep + 2);
-
-    if (d < -2048 || d > 2047) syserr(syserr_displacement, (long)d);
-    out_ldi(d);
-    out_add3(NO, R_PC, R_IR, 0);
+    (void)long_jump0(dest, YES);
 }
 
 static void branch_to(int cond, LabelNumber *dest)
@@ -520,7 +548,7 @@ static void branch_to(int cond, LabelNumber *dest)
             LabelNumber *skip = nextlabel();
 
             AddLabelReference(codep, skip);
-            out_b(cond ^ 1, 3);
+            out_b(cond ^ 1, 1 + long_jump0(dest, NO));
             long_jump(dest);
             setlabel2(skip, codep);
         }
@@ -529,6 +557,8 @@ static void branch_to(int cond, LabelNumber *dest)
         out_b(cond, 0);
     }
 }
+
+static void dumplits(bool needs_jump);
 
 /* Plant an island: every pending short reference is pointed at a long
  * jump here, which in turn becomes the pending reference. */
@@ -539,6 +569,8 @@ static void dump_island(void)
     LabelNumber *skip;
 
     if (nfrefs == 0) return;
+    /* the island takes room the literal pool's deadline did not allow for */
+    if (codep + size + 8 >= mustlitby) dumplits(YES);
     skip = nextlabel();
     if (size + 2 <= 510) {
         AddLabelReference(codep, skip);
@@ -1246,7 +1278,7 @@ static bool case_reg_dead;
 
 static void casebranch(RealRegister r1, int32 m)
 {
-    int32 table_bytes = 2 * m + 16;
+    int32 table_bytes = 6 * m + 16;     /* entries, and long jumps after */
 
     if (codep + table_bytes >= mustlitby) dumplits(YES);
     if (codep + table_bytes >= mustbranchby) dump_island();
@@ -1258,6 +1290,24 @@ static void casebranch(RealRegister r1, int32 m)
     }
     case_reg = r1;
     in_table = YES;
+}
+
+/* Every entry in a case table must be one halfword, so an entry whose
+ * label is already set but out of a B's reach branches to a long jump
+ * planted straight after the table. */
+#define MAX_TRAMPS 64
+static struct { LabelNumber *dest, *via; } tramps[MAX_TRAMPS];
+static int ntramps;
+
+static void end_table(void)
+{
+    int i;
+
+    for (i = 0; i < ntramps; i++) {
+        setlabel1(tramps[i].via);
+        long_jump(tramps[i].dest);
+    }
+    ntramps = 0;
 }
 
 /* The first BXX after a CASEBRANCH is the default; the rest form a table
@@ -1279,7 +1329,26 @@ static void case_entry(LabelNumber *dest)
         case_reg = NoRegister;
         return;
     }
-    branch_to(C_AL, dest);
+    if (lab_isset_(dest)) {
+        int32 d = label_pos(dest) - codep;
+        LabelNumber *via;
+
+        if (d >= -512 && d <= 510) {
+            AddLabelReference(codep, dest);
+            out_b(C_AL, d / 2);
+            return;
+        }
+        if (ntramps == MAX_TRAMPS) syserr("case table too far from its cases");
+        via = nextlabel();
+        tramps[ntramps].dest = dest;
+        tramps[ntramps].via = via;
+        ntramps++;
+        AddLabelReference(codep, via);
+        addfref_(via, codep | LABREF_B);
+        out_b(C_AL, 0);
+        return;
+    }
+    branch_to(C_AL, dest);              /* unset: an island can rescue it */
 }
 
 /* ---- the main entry point ---------------------------------------------- */
@@ -1421,12 +1490,15 @@ static void show_instruction_1(const Icode *const ic)
         fwd_from = NoRegister;
     }
     if (op1 != J_BXX) {
+        if (in_table) end_table();
         in_table = NO;
         case_reg = NoRegister;
     }
     if (!in_table && op1 != J_ENDPROC && op1 != J_ENTER) {
-        if (codep + 16 >= mustlitby) dumplits(YES);
-        if (codep + 16 >= mustbranchby) dump_island();
+        /* one instruction can expand to a lot: a multiply by a constant
+         * runs to 64 instructions */
+        if (codep + 136 >= mustlitby) dumplits(YES);
+        if (codep + 136 >= mustbranchby) dump_island();
     }
     switch (op & ~(Q_MASK | J_SIGNED | J_UNSIGNED | J_BASEALIGN4 | J_ALIGNMENT))
     {
