@@ -5556,12 +5556,336 @@ static bool SimpleTest(Expr const *test) {
     /* (x) has already been turned into (x != 0) */
 }
 
+/* ---- strength reduction of array indexing in for loops ----------------- */
+/* for (init; test; v = v + c) with addresses A + v * K in the body, where  */
+/* A and c do not change in the loop, gets a pointer per distinct (A, K)   */
+/* that is set up with the loop and stepped by c * K alongside v.  The     */
+/* address arithmetic leaves the loop, which matters on a machine with no  */
+/* indexed addressing.  v itself is left alone.                            */
+
+#define SR_MAX_PTRS 4
+#define SR_MAX_ASSIGNED 32
+
+typedef struct {
+    Binder *v;
+    Expr *c;
+    Binder *assigned[SR_MAX_ASSIGNED];
+    int nassigned;
+    bool bad;
+    int nptrs;
+    struct { Expr *addr; int32 scale; Binder *p; TypeExpr *t; } ptr[SR_MAX_PTRS];
+} SRState;
+
+static Expr *sr_strip(Expr *e)
+{
+    for (;;) {
+        if (e == NULL) return NULL;
+        if (h0_(e) == s_invisible) e = arg2_(e);
+        else if (h0_(e) == s_evalerror) e = arg1_(e);
+        else if (h0_(e) == s_cast) e = arg1_(e);
+        else return e;
+    }
+}
+
+static bool sr_is_assigned(SRState const *s, Binder *b)
+{
+    int i;
+    for (i = 0; i < s->nassigned; i++)
+        if (s->assigned[i] == b) return YES;
+    return NO;
+}
+
+static void sr_note_assigned(SRState *s, Expr *lhs)
+{
+    Binder *b;
+    while (lhs != NULL && (h0_(lhs) == s_invisible || h0_(lhs) == s_cast ||
+                           h0_(lhs) == s_dot))
+        lhs = h0_(lhs) == s_invisible ? arg2_(lhs) : arg1_(lhs);
+    if (lhs == NULL || h0_(lhs) != s_binder) return;   /* a store through a pointer */
+    b = exb_(lhs);
+    if (sr_is_assigned(s, b)) return;
+    if (s->nassigned == SR_MAX_ASSIGNED) { s->bad = YES; return; }
+    s->assigned[s->nassigned++] = b;
+}
+
+static void sr_scan_expr(SRState *s, Expr *e)
+{
+    AEop op;
+    if (e == NULL || s->bad) return;
+    op = h0_(e);
+    switch (op) {
+    case s_integer: case s_floatcon: case s_int64con: case s_binder:
+    case_s_any_string
+        return;
+    case s_invisible: sr_scan_expr(s, arg2_(e)); return;
+    case s_evalerror: sr_scan_expr(s, arg1_(e)); return;
+    case s_cast: case s_dot: sr_scan_expr(s, arg1_(e)); return;
+    case s_cond:
+        sr_scan_expr(s, arg1_(e)); sr_scan_expr(s, arg2_(e)); sr_scan_expr(s, arg3_(e));
+        return;
+    case s_let: sr_scan_expr(s, arg2_(e)); return;
+    case s_fnap: case s_fnapstruct: case s_fnapstructvoid:
+        {   ExprList *l;
+            sr_scan_expr(s, arg1_(e));
+            for (l = exprfnargs_(e); l != NULL; l = cdr_(l)) sr_scan_expr(s, exprcar_(l));
+        }
+        return;
+    default:
+        break;
+    }
+    if (isdiad_(op)) {
+        if (op == s_assign || op == s_init || op == s_displace || isassignop_(op))
+            sr_note_assigned(s, arg1_(e));
+        sr_scan_expr(s, arg1_(e));
+        sr_scan_expr(s, arg2_(e));
+        return;
+    }
+    if (ismonad_(op)) {
+        if (isincdec_(op)) sr_note_assigned(s, arg1_(e));
+        sr_scan_expr(s, arg1_(e));
+        return;
+    }
+    s->bad = YES;
+}
+
+static void sr_scan_cmd(SRState *s, Cmd *x)
+{
+    for (; x != NULL && !s->bad; ) {
+        switch (h0_(x)) {
+        case s_block:
+            {   CmdList *cl;
+                for (cl = cmdblk_cl_(x); cl != NULL; cl = cdr_(cl)) sr_scan_cmd(s, cmdcar_(cl));
+            }
+            return;
+        case s_if:
+            sr_scan_expr(s, cmd1e_(x)); sr_scan_cmd(s, cmd2c_(x)); x = cmd3c_(x); continue;
+        case s_do:
+            sr_scan_cmd(s, cmd1c_(x)); sr_scan_expr(s, cmd2e_(x)); return;
+        case s_for:
+            sr_scan_expr(s, cmd1e_(x)); sr_scan_expr(s, cmd2e_(x)); sr_scan_expr(s, cmd3e_(x));
+            x = cmd4c_(x); continue;
+        case s_switch:
+            sr_scan_expr(s, cmd1e_(x)); x = cmd2c_(x); continue;
+        case s_case:
+            x = cmd2c_(x); continue;
+        case s_default:
+            x = cmd1c_(x); continue;
+        case s_return: case s_semicolon:
+            sr_scan_expr(s, cmd1e_(x)); return;
+        case s_break: case s_continue: case s_endcase: case s_goto:
+            return;
+        default:                    /* labels, asm, C++: leave it alone */
+            s->bad = YES;
+            return;
+        }
+    }
+}
+
+/* Constant across the loop and free of side effects. */
+static bool sr_invariant(SRState const *s, Expr *e)
+{
+    if (e == NULL) return NO;
+    switch (h0_(e)) {
+    case s_integer: return YES;
+    case s_binder:
+        {   Binder *b = exb_(e);
+            return b != s->v && (bindstg_(b) & bitofstg_(s_auto)) != 0 &&
+                   (bindstg_(b) & b_addrof) == 0 && !sr_is_assigned(s, b);
+        }
+    case s_addrof: return h0_(arg1_(e)) == s_binder;
+    case s_invisible: return sr_invariant(s, arg2_(e));
+    case s_cast: return sr_invariant(s, arg1_(e));
+    case s_plus: case s_minus: case s_times: case s_leftshift:
+        return sr_invariant(s, arg1_(e)) && sr_invariant(s, arg2_(e));
+    default: return NO;
+    }
+}
+
+/* v = v + c or v++ (which arrives as v displaced by v + 1) */
+static bool sr_find_step(SRState *s, Expr *step)
+{
+    Expr *e = sr_strip(step), *sum, *v, *c;
+    int32 m;
+    if (e == NULL || (h0_(e) != s_assign && h0_(e) != s_displace)) return NO;
+    v = sr_strip(arg1_(e));
+    sum = sr_strip(arg2_(e));
+    if (v == NULL || h0_(v) != s_binder || sum == NULL || h0_(sum) != s_plus) return NO;
+    if (sr_strip(arg1_(sum)) == v) c = arg2_(sum);
+    else if (sr_strip(arg2_(sum)) == v) c = arg1_(sum);
+    else return NO;
+    m = mcrepofexpr(v);
+    if ((m >> MCR_SORT_SHIFT) > 1 || (m & MCR_SIZE_MASK) != 4) return NO;
+    if ((bindstg_(exb_(v)) & bitofstg_(s_auto)) == 0 || (bindstg_(exb_(v)) & b_addrof) != 0)
+        return NO;
+    s->v = exb_(v);
+    s->c = c;
+    return YES;
+}
+
+/* v, or v * K, or v << n: the scale in *scale */
+static bool sr_index(SRState const *s, Expr *x, int32 *scale)
+{
+    x = sr_strip(x);
+    if (x == NULL) return NO;
+    if (h0_(x) == s_binder && exb_(x) == s->v) { *scale = 1; return YES; }
+    if ((h0_(x) == s_times || h0_(x) == s_leftshift) &&
+        sr_strip(arg1_(x)) != NULL && h0_(sr_strip(arg1_(x))) == s_binder &&
+        exb_(sr_strip(arg1_(x))) == s->v && integer_constant(arg2_(x)) &&
+        result2 > 0 && result2 < 4096) {
+        *scale = h0_(x) == s_times ? result2 : (int32)1 << result2;
+        return YES;
+    }
+    return NO;
+}
+
+static bool sr_is_pointer_typed(Expr *e)
+{
+    TypeExpr *t = princtype(type_(e));
+    return h0_(t) == t_content;
+}
+
+static void sr_rewrite_expr(SRState *s, Expr *e);
+
+/* A + v * K becomes the pointer, in place: the node turns into a cast of
+ * the pointer binder to its own type. */
+static bool sr_try_node(SRState *s, Expr *e)
+{
+    Expr *a, *x;
+    int32 scale;
+    int i;
+
+    if (h0_(e) != s_plus || !sr_is_pointer_typed(e)) return NO;
+    if (sr_index(s, arg2_(e), &scale)) { a = arg1_(e); x = arg2_(e); }
+    else if (sr_index(s, arg1_(e), &scale)) { a = arg2_(e); x = arg1_(e); }
+    else return NO;
+    if (!sr_invariant(s, a)) return NO;
+    for (i = 0; i < s->nptrs; i++)
+        if (s->ptr[i].scale == scale && is_same(s->ptr[i].addr, a)) break;
+    if (i == s->nptrs) {
+        if (i == SR_MAX_PTRS) return NO;
+        s->ptr[i].addr = a;
+        s->ptr[i].scale = scale;
+        s->ptr[i].t = type_(e);
+        s->ptr[i].p = gentempbinder(type_(e));
+        s->nptrs++;
+    }
+    h0_(e) = s_cast;
+    arg1_(e) = (Expr *)s->ptr[i].p;
+    return YES;
+}
+
+static void sr_rewrite_expr(SRState *s, Expr *e)
+{
+    AEop op;
+    if (e == NULL) return;
+    if (sr_try_node(s, e)) return;
+    op = h0_(e);
+    switch (op) {
+    case s_integer: case s_floatcon: case s_int64con: case s_binder:
+    case_s_any_string
+        return;
+    case s_invisible: sr_rewrite_expr(s, arg2_(e)); return;
+    case s_evalerror: case s_cast: case s_dot: sr_rewrite_expr(s, arg1_(e)); return;
+    case s_cond:
+        sr_rewrite_expr(s, arg1_(e)); sr_rewrite_expr(s, arg2_(e)); sr_rewrite_expr(s, arg3_(e));
+        return;
+    case s_let: sr_rewrite_expr(s, arg2_(e)); return;
+    case s_fnap: case s_fnapstruct: case s_fnapstructvoid:
+        {   ExprList *l;
+            sr_rewrite_expr(s, arg1_(e));
+            for (l = exprfnargs_(e); l != NULL; l = cdr_(l)) sr_rewrite_expr(s, exprcar_(l));
+        }
+        return;
+    default:
+        break;
+    }
+    if (isdiad_(op)) { sr_rewrite_expr(s, arg1_(e)); sr_rewrite_expr(s, arg2_(e)); return; }
+    if (ismonad_(op)) { sr_rewrite_expr(s, arg1_(e)); return; }
+}
+
+static void sr_rewrite_cmd(SRState *s, Cmd *x)
+{
+    for (; x != NULL; ) {
+        switch (h0_(x)) {
+        case s_block:
+            {   CmdList *cl;
+                for (cl = cmdblk_cl_(x); cl != NULL; cl = cdr_(cl)) sr_rewrite_cmd(s, cmdcar_(cl));
+            }
+            return;
+        case s_if:
+            sr_rewrite_expr(s, cmd1e_(x)); sr_rewrite_cmd(s, cmd2c_(x)); x = cmd3c_(x); continue;
+        case s_do:
+            sr_rewrite_cmd(s, cmd1c_(x)); sr_rewrite_expr(s, cmd2e_(x)); return;
+        case s_for:
+            sr_rewrite_expr(s, cmd1e_(x)); sr_rewrite_expr(s, cmd2e_(x)); sr_rewrite_expr(s, cmd3e_(x));
+            x = cmd4c_(x); continue;
+        case s_switch:
+            sr_rewrite_expr(s, cmd1e_(x)); x = cmd2c_(x); continue;
+        case s_case:
+            x = cmd2c_(x); continue;
+        case s_default:
+            x = cmd1c_(x); continue;
+        case s_return: case s_semicolon:
+            sr_rewrite_expr(s, cmd1e_(x)); return;
+        default:
+            return;
+        }
+    }
+}
+
+/* Returns the new binders, having changed *initp, *stepp and the body. */
+static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *body)
+{
+    SRState s;
+    SynBindList *bl = NULL;
+    int i;
+
+    memclr(&s, sizeof s);
+    if (*stepp == NULL || !sr_find_step(&s, *stepp)) return NULL;
+    sr_scan_cmd(&s, body);
+    sr_scan_expr(&s, test);
+    if (s.bad || sr_is_assigned(&s, s.v)) return NULL;
+    sr_scan_expr(&s, *stepp);
+    if (s.bad || !sr_invariant(&s, s.c)) return NULL;
+    sr_rewrite_cmd(&s, body);
+    sr_rewrite_expr(&s, test);
+    if (s.nptrs == 0) return NULL;
+    for (i = 0; i < s.nptrs; i++) {
+        Binder *p = s.ptr[i].p;
+        TypeExpr *t = s.ptr[i].t;
+        int32 k = s.ptr[i].scale;
+        Expr *index = k == 1 ? (Expr *)s.v :
+                      mk_expr2(s_times, te_int, (Expr *)s.v, mkintconst(te_int, k, 0));
+        Expr *start = mk_expr2(s_assign, t, (Expr *)p,
+                               mk_expr2(s_plus, t, s.ptr[i].addr, index));
+        Expr *inc;
+        Expr *bump;
+
+        if (k == 1) inc = s.c;
+        else if (integer_constant(s.c)) inc = mkintconst(te_int, result2 * k, 0);
+        else inc = mk_expr2(s_times, te_int, s.c, mkintconst(te_int, k, 0));
+        bump = mk_expr2(s_assign, t, (Expr *)p, mk_expr2(s_plus, t, (Expr *)p, inc));
+        *initp = *initp == NULL ? start : mk_expr2(s_comma, te_void, *initp, start);
+        *stepp = mk_expr2(s_comma, te_void, *stepp, bump);
+        bl = mkSynBindList(bl, p);
+    }
+    return bl;
+}
+
 static void cg_loop(Expr *init, Expr *pretest, Expr *step, Cmd *body,
                     Expr *posttest)
 {
 /* Here I deal with all loops. Many messy things are going on!           */
     struct LoopInfo oloopinfo;
     bool once = at_least_once(init, pretest);
+    BindList *sr_binders = active_binders;
+    int32 sr_depth = current_stackdepth;
+    SynBindList *sr_new = NULL;
+#ifdef TARGET_WANTS_STRENGTH_REDUCTION
+    if (posttest == NULL && step != NULL && !usrdbg(DBG_VAR))
+        sr_new = sr_transform(&init, &step, pretest, body);
+    if (sr_new != NULL) cg_bindlist(sr_new, 0);
+#endif
 /* A large amount of status belongs with loop constructs, and gets saved */
 /* here so that it can be restored at the end of compiling the loop.     */
     oloopinfo = loopinfo;
@@ -5637,6 +5961,10 @@ static void cg_loop(Expr *init, Expr *pretest, Expr *step, Cmd *body,
     }
     if (loopinfo.breaklab != 0) start_new_basic_block(loopinfo.breaklab);
     loopinfo = oloopinfo;
+    if (sr_new != NULL) {
+        emitsetsp(J_SETSPENV, sr_binders);
+        current_stackdepth = sr_depth;
+    }
 }
 
 static int32 dense_case_table(CasePair *v, int32 ncases)

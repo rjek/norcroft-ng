@@ -375,10 +375,11 @@ static void multiply_integer(RealRegister rd, RealRegister rs, int32 k)
     }
     top = n - 1;                        /* always a +1 */
     if (rd == rs) {
-        out_mov(R_IP, rs);
+        out_mov(R_IP, rs);              /* rd already holds rs; keep a copy */
         src = R_IP;
+    } else {
+        out_mov(rd, src);
     }
-    out_mov(rd, src);
     gap = 0;
     for (i = top - 1; i >= 0; i--) {
         gap++;
