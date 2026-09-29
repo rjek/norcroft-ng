@@ -141,6 +141,12 @@ extern int32 pcs_flags;
 
 #define TARGET_HAS_ELF 1
 
+/* Common subexpressions whose value is a two-register call result (the
+ * 64-bit integer and double routines) are not eliminated: cse.c corrupts
+ * the code that reuses one, so x * x - x * x with doubles miscompiles.
+ * The same construct breaks the ARM compiler; this only avoids it. */
+#define TARGET_LACKS_2RESULT_CSE 1
+
 #define LDM_REGCOUNT_MAX_DEFAULT 16
 #define LDM_REGCOUNT_MIN_DEFAULT  3
 

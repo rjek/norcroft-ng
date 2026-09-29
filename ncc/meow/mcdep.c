@@ -66,7 +66,8 @@ char *target_asm_options(ToolEnv *t) {
 void config_init(ToolEnv *t)
 {
     IGNORE(t);
-    config = CONFIG_SOFTWARE_FP;
+    /* narrow arguments (char, short, float) are narrowed by the caller */
+    config = CONFIG_SOFTWARE_FP | CONFIG_UNWIDENED_NARROW_ARGS;
     pcs_flags = PCS_SOFTFP | PCS_NOFP | PCS_NOSTACKCHECK;
 }
 

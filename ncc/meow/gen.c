@@ -615,22 +615,27 @@ static void load_adcon(RealRegister rd, Symstr *name, int32 offset)
     load_lit(rd, i);
 }
 
+/* A double is stored little-endian throughout: low word first, in memory,
+ * in the pool and in a register pair. */
 static void load_fp_adcon(RealRegister rd, J_OPCODE op, FloatCon *fc)
 {
     int32 disp;
     int size = (op == J_MOVDK || op == J_ADCOND) ? 2 : 1;
+    int32 words[2];
 
+    words[0] = size == 2 ? fc->floatbin.db.lsd : fc->floatbin.irep[0];
+    words[1] = fc->floatbin.db.msd;
     addressability(POOL_REACH);
-    disp = lit_findwordsincurpool(fc->floatbin.irep, size, LIT_FPNUM);
+    disp = lit_findwordsincurpool(words, size, LIT_FPNUM);
     if (disp < 0) {
         if (size == 1) {
             disp = lit_findwordaux(fc->floatbin.fb.val, LIT_FPNUM,
                                    fc->floatstr,
                                    LITF_INCODE|LITF_FIRST|LITF_LAST);
         } else {
-            (void)lit_findwordaux(fc->floatbin.db.msd, LIT_FPNUM1,
+            (void)lit_findwordaux(fc->floatbin.db.lsd, LIT_FPNUM1,
                                   fc->floatstr, LITF_INCODE|LITF_FIRST);
-            disp = lit_findwordaux(fc->floatbin.db.lsd, LIT_FPNUM2,
+            disp = lit_findwordaux(fc->floatbin.db.msd, LIT_FPNUM2,
                                    fc->floatstr, LITF_INCODE|LITF_LAST) - 4;
         }
     }

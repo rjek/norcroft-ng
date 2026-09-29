@@ -2358,8 +2358,12 @@ static VRegnum cg_fnap(Expr *x, VRegnum resreg, bool valneeded)
 /* produce the code we first thought of.                                */
 /* Before 'improving' the last arg. treatment, consider the case of     */
 /* it being a structure returning function, and thus overlap occurring. */
-/* Note that this code destructively updates the aetree.                */
+/* The rewritten call is a fresh node: the tree handed to us may be     */
+/* generated again (a loop test is generated at both ends of the loop), */
+/* and updating it in place would lose the assignments the second time. */
   { ExprList *a = exprfnargs_(x);
+    ExprList *newargs = NULL, **tail = &newargs;
+    bool changed = NO;
     for (; a != NULL; a = cdr_(a))
       {   Expr *ae = exprcar_(a);
           if (ae != NULL && nastiness(ae) == ISHARD)
@@ -2368,14 +2372,19 @@ static VRegnum cg_fnap(Expr *x, VRegnum resreg, bool valneeded)
               TypeExpr *t = typeofexpr(ae);
               Binder *gen = gentempbinder(t);
               Expr *ass = mk_expr2(s_assign, t, (Expr *)gen, ae);
-              exprcar_(a) = (Expr *)gen;
+              ae = (Expr *)gen;
+              changed = YES;
               sm1temps = mkSynBindList(sm1temps, gen);
               if (sm1ass == NULL)
                   sm1ass = ass;
               else
                   sm1ass = mk_expr2(s_comma, te_void, ass, sm1ass);
           }
+          *tail = mkExprList(NULL, ae);
+          tail = &cdr_(*tail);
       }
+    if (changed)
+        x = mk_expr2(h0_(x), type_(x), arg1_(x), (Expr *)newargs);
   }
   {
 /* Compile a call to a function - being tidied!                          */

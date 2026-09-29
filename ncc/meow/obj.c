@@ -205,10 +205,13 @@ static void write_data(Buffer *b, DataInit *p)
             buf_word(b, val);
             break;
         case LIT_FPNUM:
-        {   int32 *fp = ((FloatCon *)p->val)->floatbin.irep;
+        {   FloatCon *fc = (FloatCon *)p->val;
             while (rpt-- > 0) {
-                buf_word(b, (unsigned32)fp[0]);
-                if (len == 8) buf_word(b, (unsigned32)fp[1]);
+                if (len == 8) {
+                    buf_word(b, fc->floatbin.db.lsd);
+                    buf_word(b, fc->floatbin.db.msd);
+                } else
+                    buf_word(b, (unsigned32)fc->floatbin.irep[0]);
             }
             break;
         }

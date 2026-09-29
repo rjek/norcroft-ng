@@ -3687,9 +3687,13 @@ static void cse_scanblock(BlockHead *block)
                     || r3.ex == arg1_(sim.divfn) || r3.ex == arg1_(sim.udivfn))
                   values = FindCallSet(r3.b, vregsort(r1.r), r2.i, arg);
                 else {
+#ifdef TARGET_LACKS_2RESULT_CSE
+                  values = NULL;
+#else
                   values = Find2ResCallSet(&values2, r3.b, vregsort(r1.r), r2.i, arg, c);
                   nvals = 1;
                   valno = r1.r-R_A1;
+#endif
                 }
               } else {
                 values = FindCallSet(r3.b, vregsort(r1.r), r2.i, arg);

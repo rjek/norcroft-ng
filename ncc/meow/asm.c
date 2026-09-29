@@ -353,10 +353,14 @@ static void asm_data(DataInit *p)
             else syserr(syserr_asm_trailer1, (long)rpt, (long)val.l);
             break;
         case LIT_FPNUM:
-        {   int32 *fp = ((FloatCon *)val.l) -> floatbin.irep;
-            decode_DC(fp[0]);
-            if (len == 8) fprintf(asmstream, "\n"),
-                          asm_padcol9(1), decode_DC(fp[1]);
+        {   FloatCon *fc = (FloatCon *)p->val;
+            if (len == 8) {
+                decode_DC(fc->floatbin.db.lsd);
+                fprintf(asmstream, "\n");
+                asm_padcol9(1);
+                decode_DC(fc->floatbin.db.msd);
+            } else
+                decode_DC(fc->floatbin.irep[0]);
             break;
         }
         case LIT_ADCON:
