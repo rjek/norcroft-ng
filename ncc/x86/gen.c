@@ -343,7 +343,9 @@ static bool returns_struct_in_memory(void)
 static void gen_prologue(void)
 {   int32 i;
     insz1("push", WORD, HW(FPREG));
+    x86_insns_tail->frame = YES;
     insz2("mov", WORD, HW(SPREG), HW(FPREG));
+    x86_insns_tail->frame = YES;
     nsaved = 0;
     for (i = 0; i < NSAVEDREGS; i++)
         if (function_saves(savedregs[i])) {
@@ -361,7 +363,10 @@ static void gen_prologue(void)
         /* greatest_stackdepth bytes of locals/outgoing args are pushed. */
         framepad = (-8*nsaved - SCRATCHSIZE - homesize - greatest_stackdepth) & 15;
         {   int32 frame = SCRATCHSIZE + homesize + framepad + greatest_stackdepth;
-            if (frame != 0) insz2("sub", 8, op_imm(frame), HW(SPREG));
+            if (frame != 0)
+            {   insz2("sub", 8, op_imm(frame), HW(SPREG));
+                x86_insns_tail->frame = YES;
+            }
         }
         /* Give the register arguments their addresses if they need them. */
         if (is_variadic()) nint = NARGREGS, nflt = NFLTARGREGS;
@@ -383,6 +388,7 @@ static void gen_prologue(void)
     framepad = (8 - 4*nsaved - SCRATCHSIZE - greatest_stackdepth) & 15;
     {   int32 frame = SCRATCHSIZE + framepad + greatest_stackdepth;
         insz2("sub", 4, op_imm(frame), HW(SPREG));
+        x86_insns_tail->frame = YES;
     }
 #endif
 }
@@ -439,10 +445,12 @@ static void gen_epilogue(void)
     }
 #endif
     insz2("lea", WORD, op_mem(FPREG, -1, 0, -WORD*nsaved), HW(SPREG));
+    x86_insns_tail->frame = YES;
     for (i = NSAVEDREGS; --i >= 0; )
         if (function_saves(savedregs[i]))
             insz1("pop", WORD, RW(savedregs[i]));
     insz1("pop", WORD, HW(FPREG));
+    x86_insns_tail->frame = YES;
 #ifndef TARGET_IS_X86_64
     /* The callee pops the hidden struct-result pointer.              */
     if (returns_struct_in_memory())
@@ -450,6 +458,31 @@ static void gen_epilogue(void)
     else
 #endif
         ins0("ret");
+}
+
+/* A function that makes no calls, saves no registers, and makes no    */
+/* other use of the frame pointer (so has nothing in its frame) needs   */
+/* no frame: remove the prologue and epilogue instructions that set it  */
+/* up and take it down.  The return address is then at the top of the   */
+/* stack, which only matters to calls, of which there are none.         */
+static void omit_frame(void)
+{   X86Ins *p;
+    int i;
+    if (nsaved != 0) return;
+    for (p = x86_insns; p != NULL; p = p->next)
+    {   if (p->frame) continue;
+        if (p->kind == XI_INSN && p->mnem != NULL && StrEq(p->mnem, "call"))
+            return;
+        for (i = 0; i < p->nops; i++)
+        {   X86Op const *o = &p->op[i];
+            if ((o->kind == XO_REG && (o->reg == FPREG || o->reg == SPREG)) ||
+                (o->kind == XO_MEM && (o->reg == FPREG || o->reg == SPREG ||
+                                       o->index == FPREG)))
+                return;
+        }
+    }
+    for (p = x86_insns; p != NULL; p = p->next)
+        if (p->frame) p->kind = XI_DELETED;
 }
 
 /* ---------------------------------------------------------------- */
@@ -886,6 +919,7 @@ void show_instruction(Icode const *const ic)
             deflabel(LAB_RET);
             gen_epilogue();
         }
+        omit_frame();
         return;
 
     case J_LABEL:
@@ -1137,6 +1171,18 @@ void show_instruction(Icode const *const ic)
 
     /* ---- block moves (r1 = dest, r2 = source, r3 = byte count) ---- */
     case J_MOVC:
+#ifdef TARGET_IS_X86_64
+        if (m <= SMALL_BLOCK)
+        {   /* RealRegisterUse keeps r1 and r2 out of r11.             */
+            int32 off = 0, k;
+            for (k = 8; k >= 1; k >>= 1)
+                for (; m - off >= k; off += k)
+                {   insz2("mov", k, op_mem(hw(r2), -1, 0, off), op_reg(SCRATCH_INT, k));
+                    insz2("mov", k, op_reg(SCRATCH_INT, k), op_mem(hw(r1), -1, 0, off));
+                }
+            return;
+        }
+#endif
         insz1("push", WORD, HW(X86_ESI));
         insz1("push", WORD, HW(X86_EDI));
         insz1("push", WORD, HW(X86_ECX));
@@ -1150,6 +1196,15 @@ void show_instruction(Icode const *const ic)
         insz1("pop", WORD, HW(X86_ESI));
         return;
     case J_CLRC:
+#ifdef TARGET_IS_X86_64
+        if (m <= SMALL_BLOCK)
+        {   int32 off = 0, k;
+            for (k = 8; k >= 1; k >>= 1)
+                for (; m - off >= k; off += k)
+                    insz2("mov", k, op_imm(0), op_mem(hw(r1), -1, 0, off));
+            return;
+        }
+#endif
         insz1("push", WORD, HW(X86_EDI));
         insz1("push", WORD, HW(X86_ECX));
         insz1("push", WORD, HW(X86_EAX));

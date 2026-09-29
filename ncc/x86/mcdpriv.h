@@ -37,6 +37,10 @@ extern int32 pcs_flags;
 #define X86_R14 14
 #define X86_R15 15
 
+/* Block moves and clears of up to this many bytes are done in-line     */
+/* (with r11 as a scratch register), and longer ones with rep movs.     */
+#define SMALL_BLOCK 64
+
 /* Interface between gen.c and asm.c.                                   */
 extern void x86_asm_function(Symstr const *name);
 

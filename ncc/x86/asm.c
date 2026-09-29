@@ -189,6 +189,8 @@ static void pr_ins(X86Ins const *p)
     case XI_DIRECTIVE:
         fprintf(as, "%s\n", p->mnem);
         return;
+    case XI_DELETED:
+        return;
     case XI_DATA:
         if (p->nops == 2) {
             fprintf(as, "\t%s\t", p->mnem);

@@ -60,6 +60,9 @@ void RealRegisterUse(Icode const *ic, RealRegUse *u)
         c_in = c_out = regbit(I_ECX);
         break;
 #ifdef TARGET_IS_X86_64
+    case J_MOVC:                    /* see gen.c                        */
+        if (ic->r3.i <= SMALL_BLOCK) c_in = c_out = regbit(I_R11);
+        break;
     case J_CASEBRANCH:              /* see gen.c                        */
         c_in = c_out = regbit(I_R10) | regbit(I_R11);
         break;

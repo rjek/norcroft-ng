@@ -3506,6 +3506,24 @@ default:
 static VRegnum cg_cast1(Expr *x1, int32 mclength, int32 mcmode)
 {
     if (mclength==0) return cg_exprvoid(x1);  /* cast to void */
+#ifdef TARGET_HAS_64BIT_INTREGS
+    /* An and with a non-negative constant is done in 64 bits, leaving   */
+    /* the value properly extended already (even if cast to another     */
+    /* integer type of the same size).                                  */
+    if (mclength == 8 && (mcmode == 0 || mcmode == 1))
+    {   Expr *e = x1;
+        while (h0_(e) == s_cast &&
+               (mcrepofexpr(e) >> MCR_SORT_SHIFT) <= 1 &&
+               (mcrepofexpr(arg1_(e)) >> MCR_SORT_SHIFT) <= 1 &&
+               (mcrepofexpr(e) & MCR_SIZE_MASK) ==
+                   (mcrepofexpr(arg1_(e)) & MCR_SIZE_MASK))
+            e = arg1_(e);
+        if (h0_(e) == s_and && h0_(arg2_(e)) == s_integer &&
+            intval_(arg2_(e)) >= 0 &&
+            (mcrepofexpr(e) >> MCR_SORT_SHIFT) <= 1)
+            return cg_expr(x1);
+    }
+#endif
     return cg_cast1_(cg_expr(x1), mclength, mcmode, mcrepofexpr(x1));
 }
 
@@ -5253,7 +5271,7 @@ static VRegnum open_compilable(Expr **xp, RegSort rsort, bool valneeded)
    is longer than the number of registers I'm prepared to guarantee available).
    WD: should we do this for 2 words (doubles) too?
  */
-          if (n >= 8) {
+          if (n > MEMCPYQUANTUM) {
             procflags |= PROC_HASMOVC;
             spareregs += 2;
             r1 = cg_expr(a1);

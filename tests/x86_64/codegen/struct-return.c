@@ -36,7 +36,8 @@ long use(void) { struct two t = two(4); struct dd d = dd(1.5); return t.b + (lon
 
 // CHECK: movq %rdi, -8(%rbp)
 
-// CHECK: rep movsq
+// CHECK: movq 16(%rax), %r11
+// CHECK: movq %r11, 16(%rdi)
 
 // CHECK: movq -8(%rbp), %rax
 

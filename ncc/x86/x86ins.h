@@ -49,7 +49,8 @@ typedef enum {
     XI_LABEL,               /* op[0] (XO_LAB) is defined here           */
     XI_DATA,                /* data directive mnem op[0], or mnem       */
                             /* op[0]-op[1] if there are two operands    */
-    XI_DIRECTIVE            /* mnem is the complete text                */
+    XI_DIRECTIVE,           /* mnem is the complete text                */
+    XI_DELETED              /* (removed after the event)                */
 } X86InsKind;
 
 typedef struct X86Ins {
@@ -58,6 +59,7 @@ typedef struct X86Ins {
     unsigned8 nops;
     unsigned8 size;         /* if non-zero, the suffix for mnem: size   */
                             /* 1, 2, 4 or 8 bytes gives b, w, l or q    */
+    unsigned8 frame;        /* sets up or takes down the frame          */
     char const *mnem;
     X86Op op[3];
 } X86Ins;

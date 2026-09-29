@@ -829,9 +829,15 @@ case J_LDRFV:case J_STRFV: case J_LDRDV:case J_STRDV:
 #ifdef TARGET_HAS_64BIT_INTREGS
             /* An integer register's binder has a whole register's worth */
             /* of stack (alignof_toplevel_auto), and may hold a 64-bit    */
-            /* value whatever its type.                                   */
-            if ((ic.op & J_TABLE_BITS) == J_LDRK ||
-                (ic.op & J_TABLE_BITS) == J_STRK)
+            /* value whatever its type (CSE's are all int).  But a        */
+            /* variable whose address is taken has its own type, and may  */
+            /* be stored to at that width through a pointer, when a wider */
+            /* load would be slow (stopping store to load forwarding).    */
+            if (((ic.op & J_TABLE_BITS) == J_LDRK ||
+                 (ic.op & J_TABLE_BITS) == J_STRK) &&
+                !((bindstg_(bb) & b_addrof) &&
+                  bindmcrep_(bb) != NOMCREPCACHE &&
+                  (bindmcrep_(bb) & MCR_SIZE_MASK) < 8))
                 ic.op = J_XtoY(ic.op & ~J_ALIGNMENT, J_LDRK, J_LDRLK) | J_ALIGN8;
 #endif
             show_mem_inst(ic.op, ic.r1.r, bb);

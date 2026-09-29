@@ -49,10 +49,13 @@
 #define TARGET_HAS_BLOCKMOVE            1   /* J_MOVC/J_CLRC: rep movs  */
 #define TARGET_HAS_SWITCH_BRANCHTABLE   1
 #define TARGET_HAS_NEGATIVE_INDEXING    1
-#define TARGET_FP_LITS_FROM_MEMORY      1
+#define TARGET_ADDRESSES_UNSIGNED       1
 #define TARGET_STACKS_LINK              1
 #define TARGET_CALLER_EXTENDS_NARROW_RESULTS 1
 #define TARGET_LACKS_DIVIDE_LITERALS    1
+/* Almost all x86 instructions change the flags, so a switch's compares  */
+/* mustn't leave them for use in later blocks (see casebranch()).        */
+#define TARGET_LACKS_3WAY_COMPARE       1
 #define TARGET_DOESNT_CHECK_SWIS        1
 #define immed_cmp(n)                    1
 
