@@ -5572,9 +5572,178 @@ typedef struct {
     Binder *assigned[SR_MAX_ASSIGNED];
     int nassigned;
     bool bad;
+    bool has_jumps;                 /* a continue or goto in the body */
+    int cond_depth;                 /* >0 inside anything not run once per time round */
+    bool in_test;
     int nptrs;
-    struct { Expr *addr; int32 scale; Binder *p; TypeExpr *t; } ptr[SR_MAX_PTRS];
+    struct {
+        Expr *addr; int32 scale; Binder *p; TypeExpr *t;
+        int uses; Expr *node; bool once;    /* once: one use, run every time round */
+    } ptr[SR_MAX_PTRS];
 } SRState;
+
+/* How often each variable is named in the whole function, so that a loop
+ * variable named nowhere else can be dropped in favour of its pointer. */
+#define SR_MAX_REFS 512
+/* n: mentions in the function.  reinit: those inside for loops whose init
+ * assigns the variable afresh, which cannot see its value from before. */
+static struct { Binder *b; int n; int reinit; int active; } sr_refs[SR_MAX_REFS];
+static int sr_nrefs;
+static bool sr_refs_ok;
+static bool sr_has_goto;
+static Binder *sr_target;           /* count only this one, into sr_hits */
+static int sr_hits;
+
+static int sr_ref_slot(Binder *b)
+{
+    int i;
+    for (i = 0; i < sr_nrefs; i++)
+        if (sr_refs[i].b == b) return i;
+    if (sr_nrefs == SR_MAX_REFS) { sr_refs_ok = NO; return -1; }
+    sr_refs[sr_nrefs].b = b;
+    sr_refs[sr_nrefs].n = sr_refs[sr_nrefs].reinit = sr_refs[sr_nrefs].active = 0;
+    return sr_nrefs++;
+}
+
+static void sr_hit(Binder *b)
+{
+    int i;
+    if (sr_target != NULL) {
+        if (b == sr_target) sr_hits++;
+        return;
+    }
+    i = sr_ref_slot(b);
+    if (i < 0) return;
+    sr_refs[i].n++;
+    if (sr_refs[i].active > 0) sr_refs[i].reinit++;
+}
+
+static void sr_count_expr(Expr *e);
+
+/* The variable a for loop's init assigns without reading, or NULL. */
+static Binder *sr_init_target(Expr *init)
+{
+    Expr *e = init;
+    Binder *b;
+    Binder *save;
+    int savehits;
+
+    while (e != NULL && (h0_(e) == s_invisible || h0_(e) == s_cast || h0_(e) == s_comma))
+        e = h0_(e) == s_invisible ? arg2_(e) : h0_(e) == s_cast ? arg1_(e) : arg2_(e);
+    if (e == NULL || h0_(e) != s_assign) return NULL;
+    e = arg1_(e);
+    while (e != NULL && (h0_(e) == s_invisible || h0_(e) == s_cast))
+        e = h0_(e) == s_invisible ? arg2_(e) : arg1_(e);
+    if (e == NULL || h0_(e) != s_binder) return NULL;
+    b = exb_(e);
+    save = sr_target; savehits = sr_hits;
+    sr_target = b; sr_hits = 0;
+    sr_count_expr(init);
+    if (sr_hits != 1) b = NULL;         /* read as well as written */
+    sr_target = save; sr_hits = savehits;
+    return b;
+}
+
+static void sr_count_cmd(Cmd *x);
+
+static void sr_count_expr(Expr *e)
+{
+    AEop op;
+    if (e == NULL) return;
+    op = h0_(e);
+    switch (op) {
+    case s_integer: case s_floatcon: case s_int64con:
+    case_s_any_string
+        return;
+    case s_binder: sr_hit(exb_(e)); return;
+    case s_invisible: sr_count_expr(arg2_(e)); return;
+    case s_evalerror: case s_cast: case s_dot: sr_count_expr(arg1_(e)); return;
+    case s_cond:
+        sr_count_expr(arg1_(e)); sr_count_expr(arg2_(e)); sr_count_expr(arg3_(e));
+        return;
+    case s_let: sr_count_expr(arg2_(e)); return;
+    case s_fnap: case s_fnapstruct: case s_fnapstructvoid:
+        {   ExprList *l;
+            sr_count_expr(arg1_(e));
+            for (l = exprfnargs_(e); l != NULL; l = cdr_(l)) sr_count_expr(exprcar_(l));
+        }
+        return;
+    default:
+        break;
+    }
+    if (isdiad_(op)) { sr_count_expr(arg1_(e)); sr_count_expr(arg2_(e)); return; }
+    if (ismonad_(op)) { sr_count_expr(arg1_(e)); return; }
+    sr_refs_ok = NO;
+}
+
+static void sr_count_cmd(Cmd *x)
+{
+    for (; x != NULL; ) {
+        switch (h0_(x)) {
+        case s_block:
+            {   CmdList *cl;
+                for (cl = cmdblk_cl_(x); cl != NULL; cl = cdr_(cl)) sr_count_cmd(cmdcar_(cl));
+            }
+            return;
+        case s_if:
+            sr_count_expr(cmd1e_(x)); sr_count_cmd(cmd2c_(x)); x = cmd3c_(x); continue;
+        case s_do:
+            sr_count_cmd(cmd1c_(x)); sr_count_expr(cmd2e_(x)); return;
+        case s_for:
+            {   int slot = -1;
+                if (sr_target == NULL) {
+                    Binder *b = sr_init_target(cmd1e_(x));
+                    if (b != NULL) slot = sr_ref_slot(b);
+                }
+                if (slot >= 0) sr_refs[slot].active++;
+                sr_count_expr(cmd1e_(x)); sr_count_expr(cmd2e_(x)); sr_count_expr(cmd3e_(x));
+                sr_count_cmd(cmd4c_(x));
+                if (slot >= 0) sr_refs[slot].active--;
+            }
+            return;
+        case s_switch:
+            sr_count_expr(cmd1e_(x)); x = cmd2c_(x); continue;
+        case s_case: x = cmd2c_(x); continue;
+        case s_default: x = cmd1c_(x); continue;
+        case s_colon: x = cmd2c_(x); continue;
+        case s_return: case s_semicolon:
+            sr_count_expr(cmd1e_(x)); return;
+        case s_goto:
+            sr_has_goto = YES;
+            return;
+        case s_break: case s_continue: case s_endcase:
+            return;
+        default:
+            sr_refs_ok = NO;
+            return;
+        }
+    }
+}
+
+/* Called once per function before its code is generated. */
+static void sr_count_function(Cmd *body)
+{
+    sr_nrefs = 0;
+    sr_refs_ok = YES;
+    sr_has_goto = NO;
+    sr_target = NULL;
+    sr_count_cmd(body);
+}
+
+/* Mentions of b outside a loop that reads it inloop times and starts by
+ * assigning it (or not): those in other loops that assign it afresh do
+ * not count, unless a goto could reach them some other way. */
+static int sr_refs_elsewhere(Binder *b, int inloop, bool this_loop_assigns)
+{
+    int i;
+    for (i = 0; i < sr_nrefs; i++)
+        if (sr_refs[i].b == b) {
+            int reinit = sr_refs[i].reinit - (this_loop_assigns ? inloop : 0);
+            if (sr_has_goto) reinit = 0;
+            return sr_refs[i].n - inloop - reinit;
+        }
+    return 0;
+}
 
 static Expr *sr_strip(Expr *e)
 {
@@ -5672,7 +5841,10 @@ static void sr_scan_cmd(SRState *s, Cmd *x)
             x = cmd1c_(x); continue;
         case s_return: case s_semicolon:
             sr_scan_expr(s, cmd1e_(x)); return;
-        case s_break: case s_continue: case s_endcase: case s_goto:
+        case s_continue: case s_goto:
+            s->has_jumps = YES;
+            return;
+        case s_break: case s_endcase:
             return;
         default:                    /* labels, asm, C++: leave it alone */
             s->bad = YES;
@@ -5767,8 +5939,12 @@ static bool sr_try_node(SRState *s, Expr *e)
         s->ptr[i].scale = scale;
         s->ptr[i].t = type_(e);
         s->ptr[i].p = gentempbinder(type_(e));
+        s->ptr[i].uses = 0;
         s->nptrs++;
     }
+    s->ptr[i].uses++;
+    s->ptr[i].node = e;
+    s->ptr[i].once = s->ptr[i].uses == 1 && s->cond_depth == 0 && !s->in_test;
     h0_(e) = s_cast;
     arg1_(e) = (Expr *)s->ptr[i].p;
     return YES;
@@ -5787,7 +5963,16 @@ static void sr_rewrite_expr(SRState *s, Expr *e)
     case s_invisible: sr_rewrite_expr(s, arg2_(e)); return;
     case s_evalerror: case s_cast: case s_dot: sr_rewrite_expr(s, arg1_(e)); return;
     case s_cond:
-        sr_rewrite_expr(s, arg1_(e)); sr_rewrite_expr(s, arg2_(e)); sr_rewrite_expr(s, arg3_(e));
+        sr_rewrite_expr(s, arg1_(e));
+        s->cond_depth++;
+        sr_rewrite_expr(s, arg2_(e)); sr_rewrite_expr(s, arg3_(e));
+        s->cond_depth--;
+        return;
+    case s_andand: case s_oror:
+        sr_rewrite_expr(s, arg1_(e));
+        s->cond_depth++;
+        sr_rewrite_expr(s, arg2_(e));
+        s->cond_depth--;
         return;
     case s_let: sr_rewrite_expr(s, arg2_(e)); return;
     case s_fnap: case s_fnapstruct: case s_fnapstructvoid:
@@ -5813,14 +5998,28 @@ static void sr_rewrite_cmd(SRState *s, Cmd *x)
             }
             return;
         case s_if:
-            sr_rewrite_expr(s, cmd1e_(x)); sr_rewrite_cmd(s, cmd2c_(x)); x = cmd3c_(x); continue;
+            sr_rewrite_expr(s, cmd1e_(x));
+            s->cond_depth++;
+            sr_rewrite_cmd(s, cmd2c_(x)); sr_rewrite_cmd(s, cmd3c_(x));
+            s->cond_depth--;
+            return;
         case s_do:
-            sr_rewrite_cmd(s, cmd1c_(x)); sr_rewrite_expr(s, cmd2e_(x)); return;
+            s->cond_depth++;
+            sr_rewrite_cmd(s, cmd1c_(x)); sr_rewrite_expr(s, cmd2e_(x));
+            s->cond_depth--;
+            return;
         case s_for:
+            s->cond_depth++;
             sr_rewrite_expr(s, cmd1e_(x)); sr_rewrite_expr(s, cmd2e_(x)); sr_rewrite_expr(s, cmd3e_(x));
-            x = cmd4c_(x); continue;
+            sr_rewrite_cmd(s, cmd4c_(x));
+            s->cond_depth--;
+            return;
         case s_switch:
-            sr_rewrite_expr(s, cmd1e_(x)); x = cmd2c_(x); continue;
+            sr_rewrite_expr(s, cmd1e_(x));
+            s->cond_depth++;
+            sr_rewrite_cmd(s, cmd2c_(x));
+            s->cond_depth--;
+            return;
         case s_case:
             x = cmd2c_(x); continue;
         case s_default:
@@ -5839,6 +6038,7 @@ static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *bo
     SRState s;
     SynBindList *bl = NULL;
     int i;
+    Binder *init_assigns = sr_init_target(*initp);
 
     memclr(&s, sizeof s);
     if (*stepp == NULL || !sr_find_step(&s, *stepp)) return NULL;
@@ -5848,8 +6048,52 @@ static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *bo
     sr_scan_expr(&s, *stepp);
     if (s.bad || !sr_invariant(&s, s.c)) return NULL;
     sr_rewrite_cmd(&s, body);
+    s.in_test = YES;
     sr_rewrite_expr(&s, test);
+    s.in_test = NO;
     if (s.nptrs == 0) return NULL;
+
+    /* If v is named nowhere but this loop, and in the loop only in the
+     * test, the test can compare the first pointer with where it ends and
+     * v goes altogether. */
+    {   Expr *rel = sr_strip(test);
+        Expr *lim = NULL;
+        bool swapped = NO;
+        int inloop;
+
+        sr_target = s.v; sr_hits = 0;
+        sr_count_expr(*initp); sr_count_expr(test); sr_count_expr(*stepp); sr_count_cmd(body);
+        inloop = sr_hits;
+        sr_target = NULL;
+        if (sr_refs_ok && sr_refs_elsewhere(s.v, inloop, init_assigns == s.v) == 0 &&
+            rel != NULL &&
+            (h0_(rel) == s_less || h0_(rel) == s_lessequal || h0_(rel) == s_greater ||
+             h0_(rel) == s_greaterequal || h0_(rel) == s_notequal)) {
+            if (sr_strip(arg1_(rel)) == (Expr *)s.v) lim = arg2_(rel);
+            else if (sr_strip(arg2_(rel)) == (Expr *)s.v) { lim = arg1_(rel); swapped = YES; }
+        }
+        /* uses of v: one in the test, two in the step, and any in the init */
+        if (lim != NULL && sr_invariant(&s, lim)) {
+            sr_target = s.v; sr_hits = 0;
+            sr_count_expr(*initp);
+            sr_target = NULL;
+            if (inloop == sr_hits + 3) {
+                TypeExpr *t = s.ptr[0].t;
+                int32 k = s.ptr[0].scale;
+                Binder *end = gentempbinder(t);
+                Expr *scaled = k == 1 ? lim :
+                    (integer_constant(lim) ? mkintconst(te_int, result2 * k, 0) :
+                     mk_expr2(s_times, te_int, lim, mkintconst(te_int, k, 0)));
+                Expr *setend = mk_expr2(s_assign, t, (Expr *)end,
+                                        mk_expr2(s_plus, t, s.ptr[0].addr, scaled));
+                arg1_(rel) = swapped ? (Expr *)end : (Expr *)s.ptr[0].p;
+                arg2_(rel) = swapped ? (Expr *)s.ptr[0].p : (Expr *)end;
+                *initp = *initp == NULL ? setend : mk_expr2(s_comma, te_void, *initp, setend);
+                *stepp = NULL;          /* v is not stepped any more */
+                bl = mkSynBindList(bl, end);
+            }
+        }
+    }
     for (i = 0; i < s.nptrs; i++) {
         Binder *p = s.ptr[i].p;
         TypeExpr *t = s.ptr[i].t;
@@ -5864,9 +6108,17 @@ static SynBindList *sr_transform(Expr **initp, Expr **stepp, Expr *test, Cmd *bo
         if (k == 1) inc = s.c;
         else if (integer_constant(s.c)) inc = mkintconst(te_int, result2 * k, 0);
         else inc = mk_expr2(s_times, te_int, s.c, mkintconst(te_int, k, 0));
-        bump = mk_expr2(s_assign, t, (Expr *)p, mk_expr2(s_plus, t, (Expr *)p, inc));
         *initp = *initp == NULL ? start : mk_expr2(s_comma, te_void, *initp, start);
-        *stepp = mk_expr2(s_comma, te_void, *stepp, bump);
+        if (s.ptr[i].once && !s.has_jumps && integer_constant(inc)) {
+            /* the one access steps the pointer itself: *(p++) */
+            Expr *node = s.ptr[i].node;
+            h0_(node) = s_displace;
+            arg1_(node) = (Expr *)p;
+            arg2_(node) = mk_expr2(s_plus, t, (Expr *)p, inc);
+        } else {
+            bump = mk_expr2(s_assign, t, (Expr *)p, mk_expr2(s_plus, t, (Expr *)p, inc));
+            *stepp = *stepp == NULL ? bump : mk_expr2(s_comma, te_void, *stepp, bump);
+        }
         bl = mkSynBindList(bl, p);
     }
     return bl;
@@ -5886,6 +6138,7 @@ static void cg_loop(Expr *init, Expr *pretest, Expr *step, Cmd *body,
         sr_new = sr_transform(&init, &step, pretest, body);
     if (sr_new != NULL) cg_bindlist(sr_new, 0);
 #endif
+    /* (the transform may have emptied step) */
 /* A large amount of status belongs with loop constructs, and gets saved */
 /* here so that it can be restored at the end of compiling the loop.     */
     oloopinfo = loopinfo;
@@ -6711,6 +6964,9 @@ void cg_topdecl(TopDecl *x, FileLine fl)
         {   Binder *b = x->v_f.fn.name;
             SynBindList *formals = x->v_f.fn.formals;
             Cmd *body = x->v_f.fn.body;
+#ifdef TARGET_WANTS_STRENGTH_REDUCTION
+            sr_count_function(body);
+#endif
             Symstr *name = bindsym_(b);
             TypeExpr *t = prunetype(bindtype_(b)), *restype;
             int32 resrep, old_profile_option = 0;
