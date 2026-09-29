@@ -4152,6 +4152,7 @@ case bitofstg_(s_extern):
         if (bindstg_(b) & b_undef) goto jolly;
 case bitofstg_(s_static):
         if ((binduses_(b) & u_bss) && bindaddr_(b) == BINDADDR_UNSET) goto jolly;
+        if (attributes_(b) & A_TLS) goto jolly;     /* (see tls_symbol()) */
 /* v1   ->    *(&datasegment + nnn)    when v1 is a static               */
 /* See comment for s_extern above for possible improvement too.          */
         r = cg_stind(r, NULL, take_neat_address(b, rsort), flag, b,
@@ -6939,8 +6940,11 @@ void cg_topdecl(TopDecl *x, FileLine fl)
             phasename = "loopopt";
 /* Force inline functions to have internal linkage... the argument as to */
 /* why this is a Good Thing is long and complicated...                   */
+/* (unless C99 says that its definition is also an external one).        */
             currentfunction.xrflags =
-                bindstg_(b) & (bitofstg_(s_static) | bitofstg_(s_inline)) ?
+                bindstg_(b) & bitofstg_(s_static) ||
+                (bindstg_(b) & bitofstg_(s_inline) &&
+                 !(attributes_(b) & A_EXTDEF)) ?
                                       xr_code+xr_defloc : xr_code+xr_defext;
 
             correct_addrof(local_binders, regvar_binders);
@@ -6957,11 +6961,12 @@ void cg_topdecl(TopDecl *x, FileLine fl)
                     saved = Inline_Save(b, local_binders, regvar_binders);
                 /* A function saved for inlining is only compiled out of   */
                 /* line if it turns out to be needed (see Inline_Tidy()),  */
-                /* but one inlined automatically that is external needs    */
-                /* it anyway, so compile it now, keeping functions in order. */
-                if (saved && !isinline)
+                /* but one that is external needs it anyway, so compile it */
+                /* now, keeping functions in order.                        */
+                if (saved)
                 {   bool emit = (currentfunction.xrflags & xr_defext) != 0;
-                    Inline_Automatic(b, emit);
+                    if (!isinline) Inline_Automatic(b, emit);
+                    else if (emit) Inline_Emitted(b);
                     if (emit) saved = NO;
                 }
                 if (!saved) {

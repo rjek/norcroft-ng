@@ -30,7 +30,9 @@ typedef struct X86Op {
     unsigned8 star;         /* indirect jump/call target                */
     unsigned8 haslab;       /* XO_MEM: displacement includes label lab  */
     unsigned8 rip;          /* XO_MEM: relative to the program counter  */
-    unsigned8 reloc;        /* XO_MEM: sym@GOTPCREL; XO_SYM: sym@PLT    */
+    unsigned8 reloc;        /* XO_MEM: sym@GOTPCREL, or sym@GOTTPOFF if */
+                            /* 2; XO_SYM: sym@PLT                      */
+    unsigned8 seg;          /* XO_MEM: %fs: (absolute, if no registers) */
     signed char reg, index;
     unsigned8 scale;
     int32 disp;

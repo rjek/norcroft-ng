@@ -767,7 +767,18 @@ static bool is_local_sym(Symstr const *sym)
 static void load_address(RealRegister r1, Symstr const *sym, int32 n)
 {
 #ifdef TARGET_IS_X86_64
-    if (is_local_sym(sym))
+    ExtRef *x = symext_(sym);
+    if (x != NULL && (x->extflags & xr_tls))
+    {   /* C11's _Thread_local, by the initial-exec model: the offset    */
+        /* from the thread pointer (%fs:0) is in the GOT.                */
+        X86Op got = op_symmem(sym, 0), tp = op_mem(-1, -1, 0, 0);
+        got.reloc = 2;
+        tp.seg = 1;
+        insz2("mov", 8, got, RW(r1));
+        insz2("add", 8, tp, RW(r1));
+        if (n != 0) insz2("lea", 8, op_mem(hw(r1), -1, 0, n), RW(r1));
+    }
+    else if (is_local_sym(sym))
         insz2("lea", 8, op_symmem(sym, n), RW(r1));
     else {
         X86Op got = op_symmem(sym, 0);

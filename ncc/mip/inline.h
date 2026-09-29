@@ -88,6 +88,13 @@ Inline_SavedFn *Inline_FindFn(Binder *b);
 
 bool Inline_Save(Binder *b, BindList *local_binders, BindList *regvar_binders);
 
+/* Note that saved function b needs an external definition, as C99 says */
+/* when a declaration after an inline one is extern.                     */
+void Inline_NeedExternal(Binder *b);
+
+/* Note that the out-of-line copy of saved function b has been compiled. */
+void Inline_Emitted(Binder *b);
+
 /* Note that saved function b was not declared inline, but saved to be  */
 /* inlined anyway, and whether its out-of-line copy has been compiled.   */
 void Inline_Automatic(Binder *b, bool emitted);

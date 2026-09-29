@@ -212,8 +212,9 @@ typedef union {
 /* I limit the reference count to 16 bits so that there can not be any     */
 /* trouble on machines with sizeof(int)==2                                 */
     unsigned int uses:16,   /* incremented on reference */
-/* ismagic is 14 bits so that this whole field is 32 bits wide */
-                 ismagic:13,/* things like __TIME__     */
+/* ismagic is 12 bits so that this whole field is 32 bits wide */
+                 ismagic:12,/* things like __TIME__     */
+                 variadic:1,/* last parameter is ...    */
                  noifdef:1, /* 1 if not allowed to #ifdef xxx */
                  noargs:1,  /* 1 if noargs              */
                  alive:1;   /* 0 => undef'd, 1 => def'd */
@@ -249,6 +250,7 @@ typedef PP_HASHENTRY *(PP_HASHTABLE[PP_HASHSIZE]);
 #define pp_hashnoargs_(p) ((p)->u.b.noargs)
 #define pp_hashalive_(p) ((p)->u.b.alive)
 #define pp_hashismagic_(p) ((p)->u.b.ismagic)
+#define pp_hashvariadic_(p) ((p)->u.b.variadic)
 #define pp_noifdef_(p) ((p)->u.b.noifdef)
 #define pp_hashuses_(p)  ((p)->u.b.uses)
 #define pp_unchain_(p)  ((p)->unchain)
@@ -1052,7 +1054,7 @@ static int pp_rdch(void)
     if (ch != '{')
 #endif
     {   ch = pp_rdch1();
-        if (LanguageIsCPlusPlus || !HasFeature(Feature_Fussy))
+        if (LanguageIsCPlusPlus || CStd(STD_C99) || !HasFeature(Feature_Fussy))
             if (ch == '/')
             {   pp_incomment = EOL_COMMENT;
                 if (HasFeature(Feature_PPComment))
@@ -1110,13 +1112,25 @@ static int pp_skipb1(int ch)
 /* is presumed to satisfy 'isdigit'.                                    */
 /* In PCC mode we allow characters after E+/e- to be expanded (note     */
 /*             this allows X to be expanded both in 0xee+X and 3.4e+X). */
+/* Whether C23's digit separator ' is followed by a digit or letter (so  */
+/* is in a pp-number).                                                  */
+static bool pp_digit_sep(int pp_ch)
+{   int ch;
+    if (pp_ch != '\'' || !CStd(STD_C23)) return NO;
+    ch = pp_rdch();
+    pp_unrdch(ch);
+    return isalnum(ch) || ch == '_';
+}
+
 static void pp_number(int pp_ch)
-{   while (isdigit(pp_ch) || pp_cidchar(pp_ch) || pp_ch == '.')
+{   while (isdigit(pp_ch) || pp_cidchar(pp_ch) || pp_ch == '.' ||
+           pp_digit_sep(pp_ch))
     {   int c = pp_ch;
         if (!pp_skipping) pp_wrch(pp_ch);
         pp_ch = pp_rdch();
-        if ((c == 'e' || c == 'E') && (pp_ch == '+' || pp_ch == '-') &&
-                                      !HasFeature(Feature_PCC))
+        if ((c == 'e' || c == 'E' ||
+             ((c == 'p' || c == 'P') && CStd(STD_C99))) &&
+            (pp_ch == '+' || pp_ch == '-') && !HasFeature(Feature_PCC))
         {   if (!pp_skipping) pp_wrch(pp_ch);
             pp_ch = pp_rdch();
         }
@@ -1130,10 +1144,13 @@ static int32 pp_savnumber(char const *p)
 /* Only used from pp_argexpand (and hence in ANSI mode).                 */
 {   int32 i = 0;
     int ch = p[i++];
-    while (isdigit(ch) || pp_cidchar(ch) || ch == '.')
+    while (isdigit(ch) || pp_cidchar(ch) || ch == '.' ||
+           (ch == '\'' && CStd(STD_C23) && (isalnum(p[i]) || p[i] == '_')))
     {   int c = ch;
         ch = p[i++];
-        if ((c == 'e' || c == 'E') && (ch == '+' || ch == '-'))
+        if ((c == 'e' || c == 'E' ||
+             ((c == 'p' || c == 'P') && CStd(STD_C99))) &&
+            (ch == '+' || ch == '-'))
             ch = p[i++];
     }
     i--;        /* because 'i' is now one beyond first non-digit.       */
@@ -1365,6 +1382,40 @@ static void pp_argexpand(int32 ap)
 }
 
 /* pp_expand expands a macro whose args are in abuf into ebuf.          */
+/* The body dp of variadic macro p (whose arguments have been read) with */
+/* C23's __VA_OPT__ ( ... ) replaced by the ... if the variable          */
+/* arguments are not empty, and otherwise nothing.                      */
+static char const *pp_va_opt(PP_HASHENTRY *p, char const *dp)
+{   PP_ARGENTRY *a = pp_hasharglist_(p);
+    bool empty;
+    char *r = (char *)pp_alloc(strlen(dp) + 1), *q = r;
+    while (pp_argchain_(a) != NULL) a = pp_argchain_(a);
+    empty = pp_abufbase[pp_argactual_(a)] == 0;
+    while (*dp != 0)
+    {   if (StrnEq(dp, "__VA_OPT__", 10) && !pp_cidchar(dp[10]) &&
+            (dp == pp_hashbody_(p) || !pp_cidchar(dp[-1])))
+        {   char const *s = dp + 10;
+            int depth = 0;
+            while (*s == ' ') s++;
+            if (*s == '(')
+            {   char const *start = s + 1;
+                for (s = start; *s != 0; s++)
+                    if (*s == '(') depth++;
+                    else if (*s == ')' && depth-- == 0) break;
+                if (!empty)
+                {   memcpy(q, start, s - start);
+                    q += s - start;
+                }
+                dp = *s ? s + 1 : s;
+                continue;
+            }
+        }
+        *q++ = *dp++;
+    }
+    *q = 0;
+    return r;
+}
+
 static void pp_expand(PP_HASHENTRY *p, int32 nlsinargs)
 { int dch;
   int hashflag = 0;             /* always 0 in PCC mode.                */
@@ -1390,6 +1441,8 @@ static void pp_expand(PP_HASHENTRY *p, int32 nlsinargs)
   }
   dp = pp_hashismagic_(p) ? pp_special(pp_hashmagic_(p), specialbuf)
                           : pp_hashbody_(p);
+  if (pp_hashvariadic_(p) && CStd(STD_C23) && strstr(dp, "__VA_OPT__"))
+      dp = pp_va_opt(p, dp);
 #ifdef ENABLE_PP                /* spurious: deadcode elimination fixes */
   if (debugging(DEBUG_PP))
   { cc_msg("pp_expand(%s) = '%s'\n", pp_hashname_(p), dp);
@@ -1459,6 +1512,15 @@ static void pp_expand(PP_HASHENTRY *p, int32 nlsinargs)
           else
           { /* an arg 'a' to include/expand */
             int32 ap = pp_argactual_(a);
+            /* As gcc does, the comma in ', ## __VA_ARGS__' goes if the   */
+            /* variadic argument is empty.                                */
+            if ((hashflag & 2) && pp_hashvariadic_(p) &&
+                pp_argchain_(a) == 0 && pp_abufbase[ap] == 0)
+            {   char *e = pp_ebuftop;
+                while (e > pp_ebufbase && (e[-1] == ' ' || e[-1] == PP_TOKSEP))
+                    e--;
+                if (e > pp_ebufbase && e[-1] == ',') pp_ebuftop = e-1;
+            }
             if (in_string)
             {   cc_warn(pp_warn_macro_arg_exp_in_string,
                     pp_argname_(a), pp_hashname_(p), in_string, in_string);
@@ -1598,11 +1660,21 @@ static void pp_rd_args(PP_HASHENTRY *p, int32 uselinect)
   int32 parcnt = 0, arglinect = 0;
   int32 abufarg;   /* now offset into pp_abufbase */
   int ch;
-  int lastch = 0;
+  int lastch = 0, prevch = 0;
+  bool innum = NO;                 /* in a pp-number (see C23's ')   */
   pp_arg_align();
   abufarg = pp_abufptr - pp_abufbase;
   for (ch = pp_rdch();;)           /* read args */
   { int thisch = ch;
+    if (innum && pp_digit_sep(ch))
+    {   pp_wrch(ch);
+        prevch = ch;
+        ch = pp_rdch();
+        continue;
+    }
+    innum = (pp_cidchar(ch) || ch == '.') &&
+            (innum || (isdigit(ch) && !pp_cidchar(prevch)));
+    prevch = ch;
     switch (ch)
     { case PP_EOM: /* e.g. i(f) where i(x)=x and f=i(.                  */
                 /* maybe the following line should pp_unrdch()?         */
@@ -1650,7 +1722,10 @@ ansitoksep:     if (pp_abufptr != pp_abufbase+abufarg)
       case '\'':
       case '"': (void)pp_copystring(ch); break;
       case '(': parcnt++; pp_wrch(ch); break;
-      case ',': if (parcnt > 0) { pp_wrch(ch); break; }
+      case ',': /* (The last argument of a variadic macro takes the rest.) */
+                if (parcnt > 0 || (pp_hashvariadic_(p) && a != 0 &&
+                                   pp_argchain_(a) == 0))
+                {   pp_wrch(ch); break; }
                 pp_trimarg(pp_abufbase+abufarg);
                 pp_wrch(0);
                 if (a != 0) pp_arg_link(a, abufarg),
@@ -1675,7 +1750,9 @@ ansitoksep:     if (pp_abufptr != pp_abufbase+abufarg)
                 if (a != 0) pp_arg_link(a, abufarg),
                             a = pp_argchain_(a);
                 if (a != 0)
-                { cc_err(pp_err_few_args, pp_hashname_(p), (long)uselinect);
+                { /* A variadic macro's ... may be given no arguments.    */
+                  if (!(pp_hashvariadic_(p) && pp_argchain_(a) == 0))
+                    cc_err(pp_err_few_args, pp_hashname_(p), (long)uselinect);
                     while (a != 0)
                     {   /* default missing arguments to "" */
                         pp_arg_align();
@@ -1698,6 +1775,10 @@ ansitoksep:     if (pp_abufptr != pp_abufbase+abufarg)
    speed (and to inhibit infinitely repeatedly trying to expand)
    for identifiers when the output is to abuf for pp_process().
 */
+static void pp_Pragma_op(int pp_ch);
+static bool pp_can_include(char const *name, bool sys, FILE **fp);
+static int pp_rd_header_name(int ch, char *name, int size);
+
 static bool pp_checkid(int pp_ch)
 { PP_HASHENTRY *p;
   int32 i = 0, hash = 0;
@@ -1727,6 +1808,52 @@ static bool pp_checkid(int pp_ch)
   if (i == 1 && pp_widestrbeg(pp_abufptr[0], pp_ch) &&
       !HasFeature(Feature_PCC)) noexpandflag = 1;
   p = noexpandflag ? NULL : pp_lookup(pp_abufptr, hash);
+  if (p == NULL && !pp_inhashif && CStd(STD_C99) &&
+      StrEq("_Pragma", pp_abufptr))
+  { pp_Pragma_op(pp_ch);
+    return 0;
+  }
+  /* C23's __has_include ( header-name ) and __has_c_attribute ( attr ) */
+  /* in #if (as in gcc, from C99).                                      */
+  if (pp_inhashif && CStd(STD_C99) &&
+      (StrEq("__has_include", pp_abufptr) ||
+       StrEq("__has_c_attribute", pp_abufptr)))
+  { bool include = pp_abufptr[6] == 'i';
+    char name[256];
+    int quote = 0;
+    long value = 0;
+    pp_ch = pp_skipb1(pp_ch);
+    if (pp_ch != '(') cc_err(pp_err_has_feature);
+    else
+    { pp_ch = pp_skipb0();
+      if (include)
+      { quote = pp_rd_header_name(pp_ch, name, sizeof(name));
+        value = quote != 0 && pp_can_include(name, quote == '<', NULL);
+      }
+      else
+      { static const struct { char const *name; long value; } attrs[] = {
+          { "deprecated", 201904 }, { "fallthrough", 201904 },
+          { "maybe_unused", 201904 }, { "nodiscard", 202003 },
+          { "noreturn", 202202 }, { "_Noreturn", 202202 },
+          { "unsequenced", 202207 }, { "reproducible", 202207 }
+        };
+        int n = 0;
+        unsigned u;
+        while (pp_cidchar(pp_ch) || pp_ch == ':')
+        { if (n < 255) name[n++] = pp_ch;
+          pp_ch = pp_rdch();
+        }
+        pp_unrdch(pp_ch);
+        name[n] = 0;
+        for (u = 0; u < sizeof(attrs)/sizeof(attrs[0]); u++)
+          if (StrEq(name, attrs[u].name)) value = attrs[u].value;
+      }
+      pp_ch = pp_skipb0();
+      if (pp_ch != ')') cc_err(pp_err_has_feature);
+    }
+    pp_expand(value != 0 ? pp_hashone : pp_hashzero, 0);
+    return 0;
+  }
   if (p == NULL)
   { if (!(pp_inhashif && StrEq("defined",pp_abufptr)))
     { if (pp_scanidx < 0)
@@ -1808,6 +1935,16 @@ static bool pp_checkid(int pp_ch)
 
 static PP_ARGENTRY *pp_addtoarglist(char *id, PP_ARGENTRY *a);
 
+/* *pch is '.': read the rest of ... (leaving *pch the character after   */
+/* it), and return whether it was there.                                */
+static bool pp_rdellipsis(int *pch)
+{   if ((*pch = pp_rdch()) == '.' && (*pch = pp_rdch()) == '.')
+    {   *pch = pp_rdch();
+        return YES;
+    }
+    return NO;
+}
+
 static PP_HASHENTRY *pp_predefine2(char const *s, int n)
 { PP_HASHENTRY *p;
   int32 i = 0, hash = 0;
@@ -1827,6 +1964,7 @@ static PP_HASHENTRY *pp_predefine2(char const *s, int n)
       p = (PP_HASHENTRY *) pp_new_(sizeof(PP_HASHENTRY));
       pp_hashnoargs_(p) = 0;
       pp_hasharglist_(p) = 0;
+      pp_hashvariadic_(p) = 0;
       do
        { ch = *sarg++;;
          if (!pp_macstart(ch))
@@ -1950,8 +2088,20 @@ static void pp_define(int pp_ch, bool noifdef)
       p = (PP_HASHENTRY *) pp_new_(sizeof(PP_HASHENTRY));
       pp_hashnoargs_(p) = 0;
       pp_hasharglist_(p) = 0;
+      pp_hashvariadic_(p) = 0;
       do
        { pp_ch = pp_skipb0();
+         /* C99's variadic macros: a last parameter ... is __VA_ARGS__  */
+         /* (or, as in gcc, name... is name).                           */
+         if (pp_ch == '.' && pp_rdellipsis(&pp_ch))
+         {   char const *va = "__VA_ARGS__";
+             while (*va) pp_stuffid_(*va++);
+             pp_hasharglist_(p) = arglist =
+                 pp_addtoarglist(pp_closeid(), pp_hasharglist_(p));
+             pp_hashvariadic_(p) = 1;
+             pp_ch = pp_skipb1(pp_ch);
+             break;
+         }
          if (!pp_macstart(pp_ch))
          { if (pp_ch == ')' && params == 0) break;
            cc_err(pp_err_missing_parameter, name);
@@ -1965,6 +2115,11 @@ static void pp_define(int pp_ch, bool noifdef)
              pp_addtoarglist(pp_closeid(), pp_hasharglist_(p));
          params++;
          pp_ch = pp_skipb1(pp_ch);
+         if (pp_ch == '.' && pp_rdellipsis(&pp_ch))
+         {   pp_hashvariadic_(p) = 1;
+             pp_ch = pp_skipb1(pp_ch);
+             break;
+         }
        } while (pp_ch == ',');
       if (pp_ch != ')')
       {   cc_err(pp_err_missing_comma, name);
@@ -2223,6 +2378,144 @@ static void pp_h_elif(int pp_ch)
             pp_skipping = YES;
         /* Assert: after syn_hashif(), at end of line or at end of file */
     }
+}
+
+/* C23's #elifdef (sense YES) and #elifndef.                            */
+static void pp_h_elifdef(int pp_ch, bool sense)
+{   if (pp_ifstack == 0 || pp_ifseenelse_(pp_ifstack))
+    {   cc_rerr(pp_rerr_spurious_elif);
+        pp_skip_linetokens(pp_ch);
+    }
+    else if (pp_ifskipelse_(pp_ifstack))
+    {   pp_skipping = YES;
+        pp_skip_linetokens(pp_ch);
+    }
+    else
+    {   int32 i = 0, hash = 0;
+        PP_HASHENTRY *p = NULL;
+        if (!pp_macstart(pp_ch)) cc_err(pp_err_ifdef);
+        else
+        {   do { if (i < PP_DEFLEN)
+                 {   hash = HASH(hash, pp_ch);
+                     pp_abufbase[i++] = pp_ch;
+                 }
+                 pp_ch = pp_rdch();
+               } while (pp_cidchar(pp_ch));
+            pp_abufbase[i] = 0;
+            p = pp_lookup(pp_abufbase, hash);
+        }
+        pp_skip_linetokens(pp_ch);
+        if ((p != NULL) == sense)
+            pp_ifskipelse_(pp_ifstack) = YES, pp_skipping = NO;
+        else
+            pp_skipping = YES;
+    }
+}
+
+/* Whether the header <name> (sys) or "name" can be included (for C23's  */
+/* __has_include, and #embed, which may keep it open, as fp).           */
+static bool pp_can_include(char const *name, bool sys, FILE **fp)
+{   pp_uncompression_record *ur = NULL;
+    char const *hostname;
+    FILE *f;
+    if (name[0] == 0 ||
+        (f = pp_inclopen(name, sys, &ur, &hostname, *pp_fl)) == NULL)
+        return NO;
+    if (fp != NULL && ur == NULL)
+        *fp = f;
+    else
+    {   if (ur == NULL) trackfile_close(f);
+        pp_inclclose(*pp_fl);
+    }
+    return fp == NULL || ur == NULL;
+}
+
+/* Read a header name <...> or "...", from its opening character ch,    */
+/* into name, returning the opening character or 0.                     */
+static int pp_rd_header_name(int ch, char *name, int size)
+{   int n = 0, close = ch == '<' ? '>' : ch == '"' ? '"' : 0;
+    if (close == 0) return 0;
+    while ((ch = pp_rdch()) != close && ch != '\n' && ch != PP_EOF)
+        if (n < size-1) name[n++] = ch;
+    name[n] = 0;
+    return ch == close ? (close == '>' ? '<' : '"') : 0;
+}
+
+/* Read ( balanced pp-tokens ) as text into buf.                        */
+static int pp_rd_parenthesised(int ch, char *buf, int size)
+{   int n = 0, depth = 0;
+    ch = pp_skipb1(ch);
+    if (ch != '(') return ch;
+    for (;;)
+    {   ch = pp_rdch();
+        if (ch == '\n' || ch == PP_EOF) break;
+        if (ch == '(') depth++;
+        else if (ch == ')' && depth-- == 0) { ch = pp_rdch(); break; }
+        if (n < size-1) buf[n++] = ch;
+    }
+    buf[n] = 0;
+    return ch;
+}
+
+/* C23's #embed "file" or <file> (not macro-expanded here), with limit, */
+/* prefix, suffix and if_empty parameters: the bytes as a list of ints. */
+static void pp_h_embed(int pp_ch)
+{   char name[256], prefix[256], suffix[256], if_empty[256], lim[32];
+    int quote;
+    long limit = -1, n = 0;
+    FILE *fp = NULL;
+    prefix[0] = suffix[0] = if_empty[0] = 0;
+    if (pp_skipping)
+    {   pp_skip_linetokens(pp_ch);
+        return;
+    }
+    if ((quote = pp_rd_header_name(pp_ch, name, sizeof(name))) == 0)
+    {   cc_err(pp_err_include_quote);
+        pp_skip_linetokens(pp_rdch());
+        return;
+    }
+    pp_ch = pp_skipb0();
+    while (pp_macstart(pp_ch))
+    {   char param[32];
+        int i = 0;
+        do { if (i < 31) param[i++] = pp_ch; pp_ch = pp_rdch(); }
+        while (pp_cidchar(pp_ch));
+        param[i] = 0;
+        if (StrEq(param, "limit") || StrEq(param, "__limit__"))
+        {   pp_ch = pp_rd_parenthesised(pp_ch, lim, sizeof(lim));
+            limit = strtol(lim, NULL, 0);
+        }
+        else if (StrEq(param, "prefix") || StrEq(param, "__prefix__"))
+            pp_ch = pp_rd_parenthesised(pp_ch, prefix, sizeof(prefix));
+        else if (StrEq(param, "suffix") || StrEq(param, "__suffix__"))
+            pp_ch = pp_rd_parenthesised(pp_ch, suffix, sizeof(suffix));
+        else if (StrEq(param, "if_empty") || StrEq(param, "__if_empty__"))
+            pp_ch = pp_rd_parenthesised(pp_ch, if_empty, sizeof(if_empty));
+        else
+        {   cc_err(pp_err_embed_param, param);
+            pp_ch = pp_rd_parenthesised(pp_ch, lim, sizeof(lim));
+        }
+        pp_ch = pp_skipb1(pp_ch);
+    }
+    pp_skip_linetokens(pp_ch);
+    if (!pp_can_include(name, quote == '<', &fp) || fp == NULL)
+    {   cc_err(pp_err_include_file, quote, name, quote == '<' ? '>' : '"');
+        return;
+    }
+    {   int c;
+        char num[8];
+        while ((limit < 0 || n < limit) && (c = getc(fp)) != EOF)
+        {   if (n == 0) pp_wrbuf(prefix, strlen(prefix));
+            else pp_wrch(',');
+            sprintf(num, "%d", c);
+            pp_wrbuf(num, strlen(num));
+            n++;
+        }
+        if (n == 0) pp_wrbuf(if_empty, strlen(if_empty));
+        else pp_wrbuf(suffix, strlen(suffix));
+    }
+    trackfile_close(fp);
+    pp_inclclose(*pp_fl);
 }
 
 static void pp_h_endif(int pp_ch)
@@ -2602,21 +2895,31 @@ static int pp_pragmardch(void) {
     return ch;
 }
 
-static void pp_pragma(int pp_ch)
+/* C99's _Pragma("...") has pp_pragma1() read its string.              */
+static char const *pp_pragma_string;
+
+static int pp_stringrdch(void) {
+    int ch = *pp_pragma_string;
+    if (ch == 0) return '\n';
+    pp_pragma_string++;
+    return ch;
+}
+
+static void pp_pragma1(int pp_ch, int (*rdch)(void))
 {   /* note that ANSI say it is NOT an error to fail to parse a #pragma */
     /* that does not stop us warning on syntax we fail to recognise     */
     if (pp_skipping)
     {   pp_skip_linetokens(pp_ch);
         return;
     }
-    if (minus_e) {
+    if (minus_e && rdch == pp_pragmardch) {
         fputs("#pragma ", stdout);
         fputc(pp_ch, stdout);
     }
     for (;;)
     {   int pragchar; int32 pragval;
         while (pp_ch != PP_EOF && pp_white(pp_ch))
-            pp_ch = pp_pragmardch();
+            pp_ch = rdch();
         switch (pp_ch)
         {
     default:
@@ -2631,9 +2934,13 @@ static void pp_pragma(int pp_ch)
  */
                 do
                 {   if (p<30) pragma_name[p++] = safe_tolower(pp_ch);
-                    pp_ch = pp_pragmardch();
+                    pp_ch = rdch();
                 } while (pp_cidchar(pp_ch));
                 pragma_name[p] = 0;
+                /* The standard pragmas of C99 (#pragma STDC FP_CONTRACT */
+                /* etc.) are allowed (and ignored).                      */
+                if (CStd(STD_C99) && StrEq(pragma_name, "stdc"))
+                    break;
                 prag = keyword_pragma(pragma_name, &negate);
                 if (prag != NULL)
                 {   pragval = prag->value;
@@ -2656,21 +2963,21 @@ static void pp_pragma(int pp_ch)
             break;
     case '-':
             {   int32 n = 0; bool seen = 0;
-                pp_ch = pp_pragmardch();
+                pp_ch = rdch();
                 if (isalpha(pp_ch)) pragchar = safe_tolower(pp_ch);
                 else { cc_warn(pp_warn_bad_pragma1, (int)pp_ch);
                        break; }
-                pp_ch = pp_pragmardch();
+                pp_ch = rdch();
                 while (isdigit(pp_ch))
                     seen = 1,
                     n = n*10 + (int)(pp_ch - '0'),
-                    pp_ch = pp_pragmardch();
+                    pp_ch = rdch();
                 pragval = seen ? n : -1;
                 main_pragma_set(pragchar, pragval);
                 continue;               /* try for more pragmas on line */
             }
         }
-        pp_skip_linetokens(pp_ch);
+        if (rdch == pp_pragmardch) pp_skip_linetokens(pp_ch);
         break;
     }
 /*
@@ -2708,7 +3015,55 @@ static void pp_pragma(int pp_ch)
     }
 }
 
-static void pp_h_error_ident(int pp_ch, bool iserror)
+static void pp_pragma(int pp_ch)
+{   pp_pragma1(pp_ch, pp_pragmardch);
+}
+
+/* C99's _Pragma ( string-literal ), whose _Pragma has been read, with  */
+/* pp_ch the character after it.                                        */
+static void pp_Pragma_op(int pp_ch)
+{   char text[256];
+    unsigned n = 0;
+    while (pp_white(pp_ch) || pp_ch == PP_TOKSEP || pp_ch == PP_NOEXPAND)
+        pp_ch = pp_rdch();
+    if (pp_ch == '(')
+        do pp_ch = pp_rdch();
+        while (pp_white(pp_ch) || pp_ch == PP_TOKSEP || pp_ch == PP_NOEXPAND);
+    if (pp_ch == 'L') pp_ch = pp_rdch();
+    if (pp_ch != '"')
+    {   cc_err(pp_err_Pragma);
+        pp_unrdch(pp_ch);
+        return;
+    }
+    /* Remove the string's escapes of " and \.                           */
+    for (pp_ch = pp_rdch(); pp_ch != '"'; pp_ch = pp_rdch())
+    {   if (pp_ch == '\n' || pp_ch == PP_EOF)
+        {   cc_err(pp_err_Pragma);
+            pp_unrdch(pp_ch);
+            return;
+        }
+        if (pp_ch == '\\')
+        {   int next = pp_rdch();
+            if (next == '"' || next == '\\') pp_ch = next;
+            else if (n < sizeof(text)-1) text[n++] = (char)pp_ch, pp_ch = next;
+        }
+        if (n < sizeof(text)-1) text[n++] = (char)pp_ch;
+    }
+    text[n] = 0;
+    do pp_ch = pp_rdch();
+    while (pp_white(pp_ch) || pp_ch == PP_TOKSEP || pp_ch == PP_NOEXPAND);
+    if (pp_ch != ')')
+    {   cc_err(pp_err_Pragma);
+        pp_unrdch(pp_ch);
+    }
+    if (minus_e) printf("\n#pragma %s\n", text);
+    if (pp_skipping) return;
+    pp_pragma_string = text;
+    pp_pragma1(pp_stringrdch(), pp_stringrdch);
+    pp_pragma_string = NULL;
+}
+
+static void pp_h_error_ident(int pp_ch, int iserror)
 {   int32 n = 0;
     char msg[256];
     while (pp_ch != '\n' && pp_ch != PP_EOF)
@@ -2717,8 +3072,10 @@ static void pp_h_error_ident(int pp_ch, bool iserror)
     }
     /* fill in terminator, and continue if last char was space */
     do msg[n] = 0; while (--n >= 0 && msg[n] == ' ');
+    if (iserror == 2 && !pp_skipping)     /* C23's #warning               */
+        cc_warn(pp_warn_hash_warning, msg);
 /* the next line treats sysV #ident as a never moaning #error.         */
-    if (iserror && !pp_skipping)
+    else if (iserror && !pp_skipping)
     {   /* Groan: the ANSI rationale recommends that #error terminates */
         /* compilation, but provides no way of fixup and continue.     */
         /* The following (hopefully) temporary fix provides #pragma -e */
@@ -2791,6 +3148,11 @@ static void pp_directive(void)
     return;
   }
   else if (StrEq(v, "endif"))   pp_h_endif(pp_ch), cpp_allows_junk=1;
+  else if (StrEq(v, "elifdef") && CStd(STD_C23))  pp_h_elifdef(pp_ch, YES);
+  else if (StrEq(v, "elifndef") && CStd(STD_C23)) pp_h_elifdef(pp_ch, NO);
+  else if (StrEq(v, "warning") && CStd(STD_C23))
+      pp_h_error_ident(pp_ch, 2);
+  else if (StrEq(v, "embed") && CStd(STD_C23))    pp_h_embed(pp_ch);
   else if (StrEq(v, "line"))    pp_h_line(pp_ch);
   else if (StrEq(v, "pragma"))  pp_pragma(pp_ch);
   else if (StrEq(v, "error"))   pp_h_error(pp_ch);
@@ -3301,6 +3663,10 @@ static void pp_init2(FILE *stream, bool preinclude)
 #ifdef PASCAL
   pp_translate['{']  = PP_TOKSEP;
 #endif
+  {   int ch;                     /* C99: e.g. UTF-8 in identifiers     */
+      for (ch = 0x80; ch <= UCHAR_MAX; ch++)
+          pp_ctype[ch] = CStd(STD_C99) ? PP_MACSTART + PP_CIDCHAR : 0;
+  }
   if (HasFeature(Feature_PCC))
   {   pp_ctype['$']  = PP_MACSTART + PP_CIDCHAR;
       pp_translate[PP_TOKSEP]  = PP_TOKSEP;
@@ -3315,6 +3681,10 @@ static void pp_init2(FILE *stream, bool preinclude)
 #else
           (void)pp_predefine2("__STDC__", PP__ONE);
 #endif
+          if (CStd(STD_C99))            /* (see pp_checkid())            */
+          {   (void)pp_predefine2("__has_include", PP__ONE);
+              (void)pp_predefine2("__has_c_attribute", PP__ONE);
+          }
           if (LanguageIsCPlusPlus)
 /* [ES] requires the following to be set, note that __STDC__ is too!.   */
           {   (void)pp_predefine2("__cplusplus", PP__ONE);

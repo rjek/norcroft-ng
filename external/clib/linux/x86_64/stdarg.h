@@ -33,7 +33,8 @@ typedef __gnuc_va_list va_list;
 
 extern void __builtin_va_start(__va_list_tag *);
 
-#define va_start(ap, parmN) __builtin_va_start(ap)
+/* (C23 permits va_start(ap), as for a function with only ... parameters.) */
+#define va_start(ap, ...) __builtin_va_start(ap)
 
 /* The size of an argument in 8-byte words, and whether it is floating   */
 /* (see codeoftype() in the compiler).                                   */

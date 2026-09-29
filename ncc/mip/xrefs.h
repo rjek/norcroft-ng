@@ -106,6 +106,9 @@ struct ExtRef
 #define xr_objflg4    0x8000
 #define xr_objflg5   0x10000
 #define xr_objflg6   0x20000
+#ifdef TARGET_HAS_TLS
+#define xr_tls        xr_objflg6 /* thread-local (C11's _Thread_local)  */
+#endif
 
 #ifdef THUMB_CPLUSPLUS
 #define xr_code_32      xr_objflg1

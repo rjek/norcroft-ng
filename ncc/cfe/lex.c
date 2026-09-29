@@ -95,6 +95,8 @@ SymInfo curlex;              /* Current token and aux. info.            */
 bool inside_valof_block;
 static Symstr *resultisword;
 #endif
+static Symstr *restrictword;    /* (see lex_init())                   */
+static Symstr *noreturnword;
 
 #ifdef TARGET_HAS_INLINE_ASSEMBLER
 int asm_mode = ASM_NONE;
@@ -190,6 +192,7 @@ static AEop make_integer(int32 radix, int32 flag)
     while ((c = *cp++) != 0) {
         int32 n = 0;
         switch (radix) {
+        case 2:
         case 8:
             if (c>='8') badoct = YES;
             n = intofdigit(c);
@@ -320,9 +323,17 @@ static int nextchar(void)
     (((c) == 'x') || ((c) == 'X'))
 
 
+/* C23's digit separator ' (which pp.c has seen is between digits): skip */
+/* it, and say whether it was there.                                    */
+static bool digit_sep(void)
+{   if (curchar != '\'' || !CStd(STD_C23)) return NO;
+    nextchar();
+    return YES;
+}
+
 static int32 read_floating(int32 k)
 {   int32 flag = NUM_FLOAT;
-    while (isdigit(curchar))
+    while (isdigit(curchar) || digit_sep() && isdigit(curchar))
     {   if (k < NAMEMAX)
         {   namebuf[k++] = curchar;
             nextchar();
@@ -369,10 +380,63 @@ static int32 read_floating(int32 k)
     return flag;
 }
 
+/* C99's hexadecimal floating constants: the hex digits before any '.'  */
+/* (k of them) are in namebuf, and curchar is '.' or 'p'.  The value is  */
+/* strtod's (see real_of_string()) of the whole spelling.               */
+static AEop read_hexfloating(int32 k)
+{   char buf[NAMEMAX+8];
+    int32 n = 0, i, flag = NUM_FLOAT;
+    buf[n++] = '0', buf[n++] = 'x';
+    for (i = 0; i < k && n < NAMEMAX; i++) buf[n++] = namebuf[i];
+    if (curchar == '.')
+    {   buf[n++] = '.';
+        nextchar();
+        while (isxdigit(curchar))
+        {   if (n < NAMEMAX) buf[n++] = curchar;
+            nextchar();
+        }
+    }
+    if (k == 0 && buf[n-1] == '.') cc_err(lex_err_need_hex_dig);
+    if (curchar == 'p' || curchar == 'P')
+    {   buf[n++] = 'p';
+        nextchar();
+        if (curchar == '+' || curchar == '-')
+        {   buf[n++] = curchar;
+            nextchar();
+        }
+    }
+    else cc_err(lex_err_fp_syntax1);        /* the exponent is required */
+    if (!isdigit(curchar))
+    {   cc_err(lex_err_fp_syntax1);
+        buf[n++] = '0';
+    }
+    while (isdigit(curchar))
+    {   if (n < NAMEMAX) buf[n++] = curchar;
+        nextchar();
+    }
+    buf[n] = 0;
+    switch (curchar)
+    {   case 'l': case 'L': flag |= NUM_LONG; nextchar(); break;
+        case 'f': case 'F': flag |= NUM_SHORT; nextchar(); break;
+    }
+    lex_check_pp_number();
+    strcpy(namebuf, buf);
+    return make_floating(namebuf, flag);
+}
+
 static AEop read_number(int radix)
 {   int32 flag = NUM_INT, k = 0;        /* namebuf useful to collect chars */
-    if (radix == 16)
-    {   while (isxdigit(curchar))
+    if (radix == 2)
+    {   while (curchar == '0' || curchar == '1' || digit_sep())
+            if (curchar != '\'')
+            {   if (k < NAMEMAX) namebuf[k++] = curchar;
+                nextchar();
+            }
+        if (k == 0) cc_err(lex_err_need_hex_dig), namebuf[k++] = '0';
+        namebuf[k] = '\0';
+    }
+    else if (radix == 16)
+    {   while (isxdigit(curchar) || digit_sep() && isxdigit(curchar))
         {   if (k < NAMEMAX)
             {   namebuf[k++] = curchar;
                 nextchar();
@@ -382,6 +446,9 @@ static AEop read_number(int radix)
                 while (isxdigit(curchar)) nextchar();
             }
         }
+        namebuf[k] = '\0';
+        if (CStd(STD_C99) && (curchar == '.' || curchar == 'p' || curchar == 'P'))
+            return read_hexfloating(k);
         if (k==0)
         {   cc_err(lex_err_need_hex_dig);
             namebuf[k++] = '0';         /* treat as 0x0 */
@@ -392,7 +459,7 @@ static AEop read_number(int radix)
             cc_ansi_rerr(lex_rerr_hex_exponent);
     }
     else
-    {   while (isdigit(curchar))
+    {   while (isdigit(curchar) || digit_sep() && isdigit(curchar))
         {   if (k < NAMEMAX)
             {   namebuf[k++] = curchar;
                 nextchar();
@@ -464,11 +531,26 @@ static unsigned32 lex_string_insert(char *where, int size, unsigned32 what)
     }
 }
 
-static bool lex_string_char(char *where, int size, bool escaped)
+/* Put the character c (a code point) in a string of chars of size 2 or  */
+/* 4, as UTF-16 (C11's char16_t) or UTF-32, returning the number of      */
+/* chars used.                                                          */
+static int lex_insert_codepoint(char *where, int size, unsigned32 c)
+{   if (size == 2 && c >= 0x10000 && c <= 0x10ffff)
+    {   c -= 0x10000;
+        (void)lex_string_insert(where, 2, 0xd800 + (c >> 10));
+        (void)lex_string_insert(where + 2, 2, 0xdc00 + (c & 0x3ff));
+        return 2;
+    }
+    (void)lex_string_insert(where, size, c);
+    return 1;
+}
+
+static int lex_string_char(char *where, int size, bool escaped)
 /* read a possibly escaped (with backslash (\)) character for a           */
 /* character or string literal (possibly wide).  If read succeeds         */
 /* result is placed in where (if char) and (<size> *)where (if wide char).*/
-/* Caller aligns if wide.  Result is 1 if succeeds, 0 if null escape read */
+/* Caller aligns if wide.  Result is the number of chars placed (up to 4 */
+/* for a C99 universal character name in UTF-8), 0 if null escape read.  */
 {
     int ch = curchar;
     if (escaped) switch (ch)     /* (next character has already been read) */
@@ -485,6 +567,43 @@ case '\\':      ch = '\\';      break;  /* backslash                      */
 case '\'':      ch = '\'';      break;  /* single quote mark              */
 case '\"':      ch = '\"';      break;  /* double quote mark              */
 case '?':       ch = '?';       break;  /* '?' in case \?\?\? is needed   */
+
+case 'u':
+case 'U':       /* C99's universal character names                        */
+        if (CStd(STD_C99))
+        {   int n = ch == 'u' ? 4 : 8;
+            unsigned32 c = 0;
+            while (n-- > 0)
+            {   if (!isxdigit(nextchar()))
+                {   cc_err(lex_err_need_hex_dig1);
+                    return 0;
+                }
+                c = (c << 4) + intofxdigit(curchar);
+            }
+            nextchar();
+            if (size > 1) return lex_insert_codepoint(where, size, c);
+            if (c < 0x80)
+            {   (void)lex_string_insert(where, size, c);
+                return 1;
+            }
+            if (c < 0x800)
+            {   where[0] = (char)(0xc0 | c >> 6);
+                where[1] = (char)(0x80 | (c & 0x3f));
+                return 2;
+            }
+            if (c < 0x10000)
+            {   where[0] = (char)(0xe0 | c >> 12);
+                where[1] = (char)(0x80 | (c >> 6 & 0x3f));
+                where[2] = (char)(0x80 | (c & 0x3f));
+                return 3;
+            }
+            where[0] = (char)(0xf0 | (c >> 18 & 7));
+            where[1] = (char)(0x80 | (c >> 12 & 0x3f));
+            where[2] = (char)(0x80 | (c >> 6 & 0x3f));
+            where[3] = (char)(0x80 | (c & 0x3f));
+            return 4;
+        }
+        goto default_esc;
 
 case 'x':
         {   bool ovfl = 0;
@@ -551,13 +670,26 @@ case '\n': /* drop through.  note no nextchar() here so read_string()
            return 0;
 
 default:  /* pp.c removes control chars if !Feature_PCC */
+default_esc:
           cc_ansi_rerr(lex_rerr_illegal_esc, (int)ch, (int)ch);
           break;      /* i.e. treat unknown escape "\Q" as "Q"            */
     }
     nextchar();
     /* note the next line translates all chars except \ooo and \xooo */
 return_ch:
-    (void)lex_string_insert(where, size, char_translation(ch));
+    /* Since C99, a wide string's (UTF-8) multibyte characters are each  */
+    /* one wide character.                                               */
+    if (size > 1 && !escaped && (ch & 0xc0) == 0xc0 && CStd(STD_C99))
+    {   int n = (ch & 0xe0) == 0xc0 ? 1 : (ch & 0xf0) == 0xe0 ? 2 : 3;
+        unsigned32 c = ch & (0x3f >> n);
+        while (n-- > 0 && (curchar & 0xc0) == 0x80)
+        {   c = (c << 6) | (curchar & 0x3f);
+            nextchar();
+        }
+        return lex_insert_codepoint(where, size, c);
+    }
+    (void)lex_string_insert(where, size,
+                            char_translation(CStd(STD_C99) ? ch & 0xff : ch));
     return 1;
 }
 
@@ -581,7 +713,7 @@ static void read_string(int quote, AEop type, bool lengthwanted)
         }
 /* If I run off the end of this segment of lex_strbuf I allocate another  */
 /* and copy the part-string into it, doubling the size if necessary.      */
-        if (symstrp >= lex_strend)
+        if (symstrp + 4 > lex_strend)    /* (room for a UTF-8 character) */
         {   size_t n = symstrp - val, allocsize = LEX_STRBUFSIZE;
             while (n*2 > allocsize) allocsize *= 2;
             {   char *oval = val;
@@ -604,16 +736,17 @@ static void read_string(int quote, AEop type, bool lengthwanted)
                            /* string and overwritten at the end            */
         }
 #endif
-        if (lex_string_char(symstrp, (type == s_wstring ? sizeof_wchar : 1),
-                            escaped))
-            symstrp += (type == s_wstring ? sizeof_wchar : 1);
+        symstrp += stringunit_(type) *
+                   lex_string_char(symstrp,
+                                   stringunit_(type),
+                                   escaped);
     }
     nextchar();
     if (quote == '"')
     {   curlex.a2.len = symstrp - val;
 #ifdef EXTENSION_COUNTED_STRINGS
         if (isCountedString)  /* treat wide strings rationally        */
-            lex_string_insert(val, (type == s_wstring ? sizeof_wchar : 1),
+            lex_string_insert(val, stringunit_(type),
                               curlex.a2.len-1);
 #endif
         lex_strptr = &val[pad_to_word(curlex.a2.len)];   /* commit usage */
@@ -625,10 +758,10 @@ static void read_string(int quote, AEop type, bool lengthwanted)
 /* note that for char constants we do not commit symstrp to lex_strptr */
 /* The following line deals host-independently with single char        */
 /* constants, at least if host char is 8 bits.                         */
-        if (type == s_wstring)
-        {   if (n != sizeof_wchar) cc_rerr(lex_rerr_not1wchar);
+        if (stringunit_(type) > 1)
+        {   if (n != stringunit_(type)) cc_rerr(lex_rerr_not1wchar);
             if (n != 0)
-            {   if (sizeof_wchar == 4)
+            {   if (stringunit_(type) == 4)
                 {   k = *(uint32 *)val;
                     if (target_lsbytefirst != host_lsbytefirst) {
                         k =   ((k & 0xff) << 24)
@@ -667,7 +800,10 @@ static void read_string(int quote, AEop type, bool lengthwanted)
             if (sizeof_int == 2) k = (int16)k;  /* normalise, eg for cmp.   */
         }
         curlex.a1.i = k;
-        curlex.a2.flag = (type == s_wstring) ? NUM_WCHAR : NUM_CHAR;
+        curlex.a2.flag = type == s_wstring ? NUM_WCHAR :
+                         type == s_u16string ? ts_short|bitoftype_(s_unsigned) :
+                         type == s_u32string ? ts_int|bitoftype_(s_unsigned) :
+                         NUM_CHAR;
                                       /* perhaps NUM_INT|NUM_LONG if n=4?   */
         curlex.sym = s_integer;       /* chars give produce int consts.     */
 /* returning s_character/s_wcharacter would improve messages for int'a';    */
@@ -741,6 +877,19 @@ case l_idstart:
             if (k == 1 && namebuf[0] == 'L'
                        && (curchar == '"' || curchar == '\''))
                 read_string(curchar, s_wstring, NO);
+/* C11's u"..." and U"..." (and chars), and u8"..." (and C23's u8 chars).  */
+            else if (k == 1 && (namebuf[0] == 'u' || namebuf[0] == 'U')
+                       && (curchar == '"' || curchar == '\'') && CStd(STD_C11))
+                read_string(curchar, namebuf[0] == 'u' ? s_u16string : s_u32string,
+                            NO);
+            else if (k == 2 && namebuf[0] == 'u' && namebuf[1] == '8' &&
+                     (curchar == '"' && CStd(STD_C11) ||
+                      curchar == '\'' && CStd(STD_C23)))
+            {   bool ch = curchar == '\'';
+                read_string(curchar, s_string, NO);
+                /* (C23's char8_t is unsigned char.)                    */
+                if (ch) curlex.a2.flag = bitoftype_(s_char)|bitoftype_(s_unsigned);
+            }
 #ifdef EXTENSION_UNSIGNED_STRINGS
             else if (k == 1 && namebuf[0] == 'U' && curchar == '"')
                 read_string(curchar, s_ustring, NO);
@@ -750,6 +899,13 @@ case l_idstart:
             else
             {   int32 type;
                 curlex.a1.sv = sym_lookup(namebuf, SYM_GLOBAL);
+/* restrict only permits optimisations that aren't made, and _Noreturn   */
+/* only warnings that aren't given, so they are ignored.                  */
+                if ((curlex.a1.sv == restrictword ||
+                     curlex.a1.sv == noreturnword) && !pp_inhashif)
+                {   next_basic_sym();
+                    break;
+                }
                 type = symtype_(curlex.a1.sv);
 /* To prepare for C++, give a warning ONCE per file in ANSI mode when a */
 /* C++ keyword is used as a C identifier.                               */
@@ -804,6 +960,12 @@ case l_digit0:                  /* octal or hex or floating     */
             {   nextchar();
                 curlex.sym = read_number(16);   /* hex */
             }
+            /* C23's binary constants (in C, as in gcc, if not -strict)  */
+            else if ((curchar == 'b' || curchar == 'B') && !LanguageIsCPlusPlus &&
+                     (CStd(STD_C23) || !HasFeature(Feature_Fussy)))
+            {   nextchar();
+                curlex.sym = read_number(2);
+            }
             else
                 curlex.sym = read_number(8);    /* octal or float */
             break;
@@ -839,6 +1001,8 @@ case l_dot:     nextchar();
 case l_noglue:
                 curlex.sym = charinfo >> 8 & 255;
                 curchar = NOTACHAR;
+                /* (Look ahead for C23's [[ (see nextsym()).)            */
+                if (curlex.sym == s_lbracket && CStd(STD_C23)) nextchar();
                 break;
 case l_eqglue:  nextchar();
                 if (curchar == '=')
@@ -982,6 +1146,23 @@ case l_hash:    if (asm_mode == ASM_STRING || asm_mode == ASM_BLOCK)
 }
 
 
+static LexReplay *replay;       /* see lex_replay()                     */
+static int32 replay_i;
+
+static void replay_next(void)
+{   curlex = replay->tok[replay_i++];
+    if (replay_i >= replay->n) replay = replay->next, replay_i = 0;
+}
+
+void lex_replay(LexReplay *r)
+{   LexReplay *last = r;
+    if (nextlex.sym != s_nothing || replay != NULL) syserr("lex_replay");
+    while (last->next != NULL) last = last->next;
+    last->tok[last->n - 1] = curlex;
+    replay = r, replay_i = 0;
+    replay_next();
+}
+
 void ungetsym(void)
 {   if (nextlex.sym != s_nothing) syserr("too many ungetsyms");
     if (debugging(DEBUG_LEX))
@@ -1000,6 +1181,8 @@ AEop nextsym(void)
     {   curlex = nextlex;
         nextlex.sym = s_nothing;
     }
+    else if (replay != NULL)
+        replay_next();
     else
     {   if (LanguageIsCPlusPlus && !pp_inhashif && nextsym_lookaside != NULL)
             lex_getbodysym();
@@ -1007,6 +1190,18 @@ AEop nextsym(void)
             next_basic_sym();
         if (LanguageIsCPlusPlus && !pp_inhashif && nextsym_put_handle >= 0)
             lex_putbodysym();
+        /* C23's attributes [[...]], none of which need have an effect,  */
+        /* are ignored.                                                  */
+        while (curlex.sym == s_lbracket && curchar == '[' &&
+               CStd(STD_C23) && !pp_inhashif)
+        {   int depth = 1;
+            do
+            {   next_basic_sym();
+                if (curlex.sym == s_lbracket) depth++;
+                else if (curlex.sym == s_rbracket) depth--;
+            } while (depth > 0 && curlex.sym != s_eof);
+            next_basic_sym();
+        }
     }
     if (debugging(DEBUG_LEX))
         {   cc_msg("<nextsym: $l");
@@ -1202,6 +1397,28 @@ void lex_init()         /* C version  */
         { "signed",   s_signed },
         { "volatile", s_volatile }
     };
+    static const struct { const char *name; AEop sym; int32 std; } ns4[] = {
+/* Keywords of later standards of C, and the -std from which they are.  */
+        { "inline",   s_inline,  STD_C99 },
+        { "_Bool",    s_bool,    STD_C90 },    /* (an extension in C90) */
+        { "_Alignof", s_alignof, STD_C11 },
+        { "_Alignas", s_alignas, STD_C11 },
+        { "_Thread_local", s_thread_local, STD_C11 },
+        { "alignas",  s_alignas, STD_C23 },
+        { "alignof",  s_alignof, STD_C23 },
+        { "bool",     s_bool,    STD_C23 },
+        { "false",    s_false,   STD_C23 },
+        { "true",     s_true,    STD_C23 },
+        { "static_assert", s_static_assert, STD_C23 },
+        { "thread_local", s_thread_local, STD_C23 },
+        { "typeof",   s_typeofc23, STD_C23 },
+        { "__typeof__", s_typeofc23, STD_C90 },   /* (as in gcc)        */
+        { "__typeof", s_typeofc23, STD_C90 },
+        { "typeof_unqual", s_typeof_unqual, STD_C23 },
+        { "nullptr",  s_nullptr, STD_C23 },
+        { "constexpr", s_constexpr, STD_C23 },
+        { "_Generic", s_generic, STD_C11 }
+    };
     static const struct keyword ns3[] = {
 /* C++ only keywords (redeclared as s_identifier on use in C mode)      */
         { "asm",      CPP_word|s_asm },
@@ -1265,6 +1482,11 @@ void lex_init()         /* C version  */
     setuplexclass1("ABCDEFGHIJKLMNOPQRSTUVWXYZ_", l_idstart);
     setuplexclass1("abcdefghijklmnopqrstuvwxyz",  l_idstart);
     setuplexclass1("123456789", l_digit1);
+    /* C99 permits other characters in identifiers, such as UTF-8's.   */
+    if (CStd(STD_C99))
+    {   int ch;
+        for (ch = 0x80; ch <= 0xff; ch++) lexclass[ch] = l_idstart | l_idcont;
+    }
     setuplexclass1("0",         l_digit0);
     /*
      * The following line is for the sake of SUN NeWS !
@@ -1296,6 +1518,16 @@ void lex_init()         /* C version  */
                 }
             }
         }
+        restrictword = noreturnword = NULL;
+        if (!LanguageIsCPlusPlus)
+        {   for (u = 0; u < sizeof(ns4)/sizeof(ns4[0]); ++u)
+                if (CStd(ns4[u].std))
+                {   sym_insert(ns4[u].name, ns4[u].sym);
+                    sym_name_table[ns4[u].sym] = ns4[u].name;
+                }
+            if (CStd(STD_C99)) restrictword = sym_insert_id("restrict");
+            if (CStd(STD_C11)) noreturnword = sym_insert_id("_Noreturn");
+        }
         if (!HasFeature(Feature_Fussy))
             sym_name_table[s_longlong] = "long long";
     }
@@ -1324,6 +1556,7 @@ void lex_init()         /* C version  */
     endofsym_fl.filepos = -1;  /* mark as invalid */
 
     lexbuf_max = 0; lexbuf_vec = (SymBuf *)DUFF_ADDR; nextsym_lookaside = 0;
+    replay = NULL, replay_i = 0;
     buffersym_bufidx = -1;
     nextsym_put_handle = -1;
 

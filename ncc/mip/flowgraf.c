@@ -47,6 +47,7 @@
 #include "errors.h"
 #include "sr.h"
 #include "inline.h"     /* Inline_RealUse */
+#include "bind.h"       /* tls_symbol */
 #include "sem.h"
 
 /* AM Sep 88: Use obj_symref before J_ADCON (may kill J_FNCON on day)    */
@@ -933,6 +934,12 @@ case J_ADCON:
         {   Binder *bb = ic.r3.b;
             Symstr *name = bindsym_(bb);
             int32 offset = 0;
+            int32 tls = 0;
+#ifdef TARGET_HAS_TLS
+            if (attributes_(bb) & A_TLS)        /* C11's _Thread_local    */
+                name = tls_symbol(bb), tls = xr_tls;
+            else
+#endif
             {
 #ifdef TARGET_HAS_BSS
                 if ((bindstg_(bb) & u_bss) && bindaddr_(bb) != BINDADDR_UNSET)
@@ -959,7 +966,7 @@ case J_ADCON:
             (void)obj_symref(name, (bindstg_(bb) & b_fnconst ?
                                              xr_code : xr_data) |
                                    (bindstg_(bb) & bitofstg_(s_weak) ?
-                                             xr_weak : 0),
+                                             xr_weak : 0) | tls,
                              0);
 /* The next line of code is probably dying given the obj_symref() above. */
             {

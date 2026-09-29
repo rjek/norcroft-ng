@@ -55,6 +55,21 @@
 static DataDesc data, *datap, extable, exhandler;
 #ifdef CONST_DATA_IN_CODE
 static DataDesc constdata;         /* ensure not used by accident                */
+#ifdef TARGET_HAS_TLS
+static DataDesc tlsdata;           /* C11's _Thread_local objects          */
+
+int32 tlsdata_size(void)
+{   return tlsdata.size;
+}
+
+DataInit *tlsdata_head(void)
+{   return tlsdata.head;
+}
+
+bool is_tlsdata(void)
+{   return datap == &tlsdata;
+}
+#endif
 #endif
 
 ExceptionEnv *currentExceptionEnv;
@@ -237,6 +252,12 @@ bool is_constdata(void)
 
 DataAreaSort SetDataArea(DataAreaSort sort) {
     DataAreaSort oldsort = is_constdata() ? DS_Const : DS_ReadWrite;
+#ifdef TARGET_HAS_TLS
+    if (is_tlsdata()) oldsort = DS_Tls;
+    if (sort == DS_Tls)
+        datap = &tlsdata;
+    else
+#endif
     if (sort == DS_Const)
         datap = &constdata;
     else if (sort == DS_ReadWrite)
@@ -489,8 +510,10 @@ void vg_genstring(StringSegList *p, int32 size, int pad)
     }
 }
 
+int32 max_static_align;      /* the most aligned static (see _Alignas) */
+
 void padstatic(int32 align)
-{
+{   if (align > max_static_align) max_static_align = align;
     if (datap->size & (align-1)) gendc0((-datap->size) & (align-1));
     if (align == 4) vg_wflush();
 }
@@ -1110,7 +1133,7 @@ int32 stringlength(StringSegList *s)
 int32 bss_size;
 
 void padbss(int32 align)
-{
+{   if (align > max_static_align) max_static_align = align;
     if (bss_size & (align-1)) bss_size += (-bss_size) & (align-1);
 }
 
@@ -1126,8 +1149,8 @@ int32 addbsssym(Symstr *sym, int32 size, int32 align, bool statik, bool local)
         int32 offset;
         if (bss_size == 0)
             obj_symref(bindsym_(bsssegment), xr_bss+xr_defloc, 0);
-        obj_symref(sym, xr_bss+(statik ? xr_defloc : xr_defext), bss_size);
         padbss(align);
+        obj_symref(sym, xr_bss+(statik ? xr_defloc : xr_defext), bss_size);
         offset = bss_size;
         endbssobject(size);
         return offset;
@@ -1236,6 +1259,11 @@ void codebuf_init(void)
     constdata.xrefs = NULL; constdata.xrarea = xr_constdata;
     constdata.wpos = 0; constdata.wtype = 0; constdata.wbuff.w32[0] = 0;
 #endif
+#ifdef TARGET_HAS_TLS
+    tlsdata.head = tlsdata.tail = NULL; tlsdata.size = 0;
+    tlsdata.xrefs = NULL; tlsdata.xrarea = xr_data+xr_tls;
+    tlsdata.wpos = 0; tlsdata.wtype = 0; tlsdata.wbuff.w32[0] = 0;
+#endif
     datap = &data;
 #ifdef TARGET_CALL_USES_DESCRIPTOR
     fnconlab = 0;                                  /* WGD 27-3-88 */
@@ -1243,6 +1271,7 @@ void codebuf_init(void)
 #ifdef TARGET_HAS_BSS
     bss_size = 0;
 #endif
+    max_static_align = 0;
     codebase = 0;
     maxprocsize = 0, maxprocname = "<none>";
     codebuf_reinit();      /* in case mcdep_init() is wild */

@@ -121,7 +121,7 @@ static void pr_disp(X86Op const *o)
     bool any = NO;
     if (o->sym != NULL) {
         pr_sym(o->sym);
-        if (o->reloc) fputs("@GOTPCREL", as);
+        if (o->reloc) fputs(o->reloc == 2 ? "@GOTTPOFF" : "@GOTPCREL", as);
         any = YES;
     }
     if (o->haslab) {
@@ -153,6 +153,7 @@ static void pr_op(X86Op const *o)
         pr_disp(o);
         break;
     case XO_MEM:
+        if (o->seg) fputs("%fs:", as);
         if (o->sym != NULL || o->haslab || o->disp != 0 || o->reg < 0)
             pr_disp(o);
         if (o->reg >= 0 || o->index >= 0) {
@@ -161,7 +162,7 @@ static void pr_op(X86Op const *o)
             if (o->index >= 0)
                 fprintf(as, ",%%%s,%d", addrreg(o->index), o->scale);
             fputc(')', as);
-        } else if (X86_PTRSIZE == 8)
+        } else if (X86_PTRSIZE == 8 && !o->seg)
             /* An absolute address would need a 32-bit relocation.    */
             fputs("(%rip)", as);
         break;
@@ -265,7 +266,13 @@ static void asm_data(DataInit *p)
             if (is_global(s)) {
                 fputs("\t.globl\t", as); pr_sym(s); fputc('\n', as);
             }
-            fputs("\t.type\t", as); pr_sym(s); fputs(", @object\n", as);
+            fputs("\t.type\t", as); pr_sym(s);
+#ifdef TARGET_HAS_TLS
+            if (symext_(s) != NULL && (symext_(s)->extflags & xr_tls))
+                fputs(", @tls_object\n", as);
+            else
+#endif
+                fputs(", @object\n", as);
             pr_sym(s);
             fputs(":\n", as);
             break;
@@ -340,12 +347,20 @@ typedef struct ExtRefList {
     ExtRef *car;
 } ExtRefList;
 
+/* The alignment of the data areas: 16, or that of a more aligned       */
+/* object in them (see _Alignas).                                       */
+static int area_p2align(void)
+{   int n = 4;
+    while ((1L << n) < max_static_align) n++;
+    return n;
+}
+
 static void asm_bss(void)
 {   FILE *as = asmstream;
     int32 n = 0;
     ExtRef *x;
     ExtRefList *syms = NULL;
-    fputs("\n\t.bss\n\t.p2align\t4\n.Lbss:\n", as);
+    fprintf(as, "\n\t.bss\n\t.p2align\t%d\n.Lbss:\n", area_p2align());
     /* Sort the BSS symbols by offset.                                */
     for (x = obj_symlist; x != NULL; x = x->extcdr)
         if (x->extflags & xr_bss) {
@@ -382,14 +397,22 @@ void asm_trailer(void)
         for (d = constdata_head(); d != NULL; d = d->datacdr)
             if (d->sort == LIT_ADCON && X86_PTRSIZE == 8)
                 sect = ".data.rel.ro,\"aw\"";
-        fprintf(as, "\n\t.section\t%s\n\t.p2align\t4\n.Lconst:\n", sect);
+        fprintf(as, "\n\t.section\t%s\n\t.p2align\t%d\n.Lconst:\n", sect,
+                area_p2align());
         asm_data(constdata_head());
     }
     if (data_size() != 0) {
-        fputs("\n\t.data\n\t.p2align\t4\n.Ldata:\n", as);
+        fprintf(as, "\n\t.data\n\t.p2align\t%d\n.Ldata:\n", area_p2align());
         asm_data(data_head());
     }
     if (bss_size != 0) asm_bss();
+#ifdef TARGET_HAS_TLS
+    if (tlsdata_size() != 0) {
+        fprintf(as, "\n\t.section\t.tdata,\"awT\",@progbits\n\t.p2align\t%d\n",
+                area_p2align());
+        asm_data(tlsdata_head());
+    }
+#endif
     if (x86_negmask_used) {
         fputs("\n\t.section\t.rodata\n\t.p2align\t4\n"
               ".Lnegmaskf:\n\t.long\t0x80000000, 0, 0, 0\n"
@@ -407,8 +430,10 @@ void asm_trailer(void)
         if (flags & (xr_defloc+xr_defext)) continue;
         if (!(flags & xr_code) && x->extoffset > 0) {
             fputs("\t.comm\t", as); pr_sym(x->extsym);
-            fprintf(as, ", %ld, %d\n", (long)x->extoffset,
-                    x->extoffset >= 16 ? 16 : x->extoffset >= 8 ? 8 : 4);
+            fprintf(as, ", %ld, %ld\n", (long)x->extoffset,
+                    x->extoffset >= 16 ?
+                        (max_static_align > 16 ? (long)max_static_align : 16L) :
+                    x->extoffset >= 8 ? 8L : 4L);
         } else if (flags & xr_weak) {
             fputs("\t.weak\t", as); pr_sym(x->extsym); fputc('\n', as);
         }

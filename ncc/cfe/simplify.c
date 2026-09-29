@@ -1948,13 +1948,15 @@ case s_typespec:
             if (container)
                 m = typeofenumcontainer(typespectagbind_(x));
             goto mcrepofint;
+    case bitoftype_(s_bool):
+            if (!LanguageIsCPlusPlus) m |= bitoftype_(s_unsigned);
+            goto mcrepofint;
     case bitoftype_(s_char):
             if ((m & (bitoftype_(s_signed)|bitoftype_(s_unsigned))) == 0)
                 m |= HasFeature(Feature_SignedChar) ?
                          bitoftype_(s_signed) : bitoftype_(s_unsigned);
             /* drop through */
     case bitoftype_(s_int):
-    case bitoftype_(s_bool):
     mcrepofint:
             {   int32 n = sizeoftype(x);
 #ifndef TARGET_HAS_64BIT_INTREGS    /* else an ordinary integer         */

@@ -381,7 +381,8 @@ DERIVED_HDRS := $(DERIVED_DIR)/errors.h $(DERIVED_DIR)/tags.h
 DERIVED_STAMP := $(DERIVED_DIR)/.generated
 
 CLIB_HDRS := assert.h ctype.h errno.h float.h iso646.h limits.h \
-			 locale.h math.h setjmp.h signal.h stdarg.h stddef.h \
+			 locale.h math.h setjmp.h signal.h stdalign.h stdarg.h stdbool.h \
+			 stddef.h stdnoreturn.h \
 			 stdio.h stdlib.h string.h time.h
 CLIB_RISCOS_HDRS := kernel.h stdint.h varargs.h
 
@@ -389,7 +390,8 @@ CLIB_HDRS    += $(if $(filter riscos riscos26,$(TARGET)),$(CLIB_RISCOS_HDRS),)
 
 # Linux targets use the system's headers, except for those the compiler
 # must supply itself.
-CLIB_LINUX_HDRS := float.h limits.h stdarg.h stddef.h
+CLIB_LINUX_HDRS := float.h iso646.h limits.h stdalign.h stdarg.h stdbool.h stddef.h \
+                   stdnoreturn.h
 ifneq (,$(filter i386 x86_64,$(TARGET)))
 CLIB_HDRS    := $(CLIB_LINUX_HDRS)
 CLIB_HDRS_DIR = external/clib/linux/$(TARGET)/

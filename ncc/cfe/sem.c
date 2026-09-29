@@ -89,9 +89,10 @@
                       (sizeof_ptr == 8 ? bitoftype_(s_long) : 0))
 
 /* The following macro is used to default the signedness for 'plain'   */
-/* char and 'plain' int bit fields.                                    */
+/* char and 'plain' int bit fields (C's _Bool bit fields are unsigned). */
 #define issignedchar_(m) ((m) & bitoftype_(s_signed) || \
-          (HasFeature(Feature_SignedChar) && !((m) & bitoftype_(s_unsigned))))
+          (HasFeature(Feature_SignedChar) && !((m) & bitoftype_(s_unsigned)) \
+           && !((m) & bitoftype_(s_bool) && !LanguageIsCPlusPlus)))
 
 Expr *errornode;
 
@@ -282,7 +283,8 @@ TypeExpr *unbitfield_type(TypeExpr *t)
 #ifdef ONE_DAY_SOON /* including C++? */
             return primtype2_(m & ~BITFIELD, typespectagbind_(t));
 #endif
-            return m & bitoftype_(s_enum) ?
+            return m & bitoftype_(s_enum) ||
+                   (m & bitoftype_(s_bool) && !LanguageIsCPlusPlus) ?
                      primtype2_(m & ~BITFIELD, typespectagbind_(t))
                    : int_islonglong_(m) ?
                      te_llint
@@ -418,11 +420,15 @@ TypeExpr *typeofexpr(Expr *x)
           } break;
 #endif
         case s_wstring:
+        case s_u16string:
+        case s_u32string:
           { int32 n = 0; StringSegList *p;
             for (p = exs_(x)->strseg; p != 0; p = p->strsegcdr)
                 n += p->strseglen;
-            t = mk_typeexpr1(t_subscript, te_wstringchar,
-                             mkintconst(te_int, n/sizeof_wchar + 1, 0));
+            t = mk_typeexpr1(t_subscript,
+                             h0_(x) == s_wstring ? te_wstringchar :
+                             h0_(x) == s_u32string ? te_uint : te_ushort,
+                             mkintconst(te_int, n/stringunit_(h0_(x)) + 1, 0));
           } break;
         case s_error:            /* @@@ remove soon? */
             t = te_int; break;   /* for sizeof() or sizeof(1.0%2.0) */
@@ -471,8 +477,9 @@ static int32 alignofclass(TagBinder *b)
     if (tagbindbits_(b) & TB_UNALIGNED)
         return 1;
 
-    /* Short circuit the code if it can never update 'n':         */
-    if (alignof_max > alignof_struct)
+    /* Short circuit the code if it can never update 'n' (as it     */
+    /* can with C11's _Alignas):                                    */
+    if (alignof_max > alignof_struct || CStd(STD_C11))
     {   ClassMember *l = tagbindmems_(b);
 /* This code should never be called when the struct/union is not defined, */
 /* but, even if it is no harm will occur as then l==0.  (!TB_DEFD)        */
@@ -515,6 +522,10 @@ case s_typespec:
         {
     case bitoftype_(s_typedefname):
             b = typespecbind_(x);
+            if (attributes_(b) & A_ALIGNAS)    /* see _Alignas             */
+            {   int32 a = alignoftype(bindtype_(b));
+                return bindaddr_(b) > a ? bindaddr_(b) : a;
+            }
             return alignoftype(bindtype_(b));
     case bitoftype_(s_char):
             return 1;
@@ -523,6 +534,8 @@ case s_typespec:
             if (m & bitoftype_(s_char)) return 1;
             /* drop through */
     case bitoftype_(s_bool):
+            if (!LanguageIsCPlusPlus) return 1;       /* C's _Bool          */
+            /* drop through */
     case bitoftype_(s_int):
             return int_decodealign_(m);
     case bitoftype_(s_double):
@@ -580,6 +593,8 @@ static int32 sizeofintegraltype(TypeExpr *x, SET_BITMAP m)
         if (m & bitoftype_(s_char)) break;
         /* drop through */
     case bitoftype_(s_bool):
+        if (!LanguageIsCPlusPlus) break;
+        /* drop through */
     case bitoftype_(s_int):
         return int_decodelength_(m);
     }
@@ -829,6 +844,9 @@ case s_typespec:
         case bitoftype_(s_int):
             if (m & BITFIELD)
                 cc_rerr(sem_rerr_sizeof_bitfield);
+            /* C's _Bool is a byte (C++'s bool, an int).                */
+            if ((m & -m) == bitoftype_(s_bool) && !LanguageIsCPlusPlus)
+                return 1;
             return int_decodelength_(m);
         case bitoftype_(s_double):
             return (m & bitoftype_(s_short)) ? sizeof_float :
@@ -2854,6 +2872,11 @@ case s_typespec:
             r = (issignedchar_(m) && (n & 0x80))
                 ? (n | ~(int32)0xff) : (n & 0xff);
             break;
+    case bitoftype_(s_bool):
+            if (LanguageIsCPlusPlus) return c;
+            r = n = (n != 0 || truncated);
+            truncated = NO;
+            break;
     case bitoftype_(s_enum):    /* ansi C says treat like 'int'.        */
     case bitoftype_(s_int):
             if (int_is64bit_(m)) {
@@ -2999,6 +3022,9 @@ static void check_index_overflow(Expr *ptr, Expr *disp, int posneg,
                 int32 k = sizeoftype(typearg_(princtype(t0)));
                 int32 n = posneg * intval_(disp);
                 if (bound && h0_(bound) == s_binder) bound = NULL;
+                /* (A zero bound is a C99 flexible array member's.)     */
+                if (bound && CStd(STD_C99) && evaluate(bound) == 0)
+                    bound = NULL;
                 if (k == 0) k = 1; /* paranoia */
                 if (!deref)
                 {   /* always whinge for n<0 or n>limit...              */
@@ -3219,7 +3245,7 @@ static Expr *coerceunary_2(Expr *e, enum Coerce_Context c)
     /* Here is just the place to check that "a[n]" is (in)valid given   */
     /* the declaration "int a[n]".                                      */
     check_index_dereference(e);
-    if (LanguageIsCPlusPlus)
+    if (LanguageIsCPlusPlus || CStd(STD_C23))       /* (C23's constexpr) */
     {
         if (h0_(e) == s_binder && bindconst_(exb_(e)))
             e = mkinvisible(qt, e, bindconst_(exb_(e)));
@@ -4758,7 +4784,7 @@ case 0: /* not obviously permissible, check more */
             switch (m & -m)    /* LSB - unsigned/long etc. are higher */
             {   case bitoftype_(s_bool):
                     if (!isprimtype_(y, s_bool))
-                    {   if ((h0_(e) != s_integer ||
+                    {   if (LanguageIsCPlusPlus && (h0_(e) != s_integer ||
                              (intval_(e) != 0 && intval_(e) != 1)))
                             cc_warn(sem_warn_unusual_bool, op);
                         e = mktest(op, e);

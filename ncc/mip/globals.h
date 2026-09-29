@@ -225,6 +225,18 @@ extern int32 rtcheck;
 #endif
 
 /*
+ * The version of C being compiled (-std=), as __STDC_VERSION__ gives it.
+ * CStd(v) is whether it is at least v, and never is when compiling C++.
+ */
+#define STD_C90 199409L
+#define STD_C99 199901L
+#define STD_C11 201112L
+#define STD_C17 201710L
+#define STD_C23 202311L
+extern int32 cc_std;
+#define CStd(v) (!LanguageIsCPlusPlus && cc_std >= (v))
+
+/*
  * Dynamic configuration flags.
  */
 extern int32 config;

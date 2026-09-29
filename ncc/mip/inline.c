@@ -83,6 +83,7 @@ struct SavedFnList {
 #define ol_used 1
 #define ol_emitted 2
 #define ol_automatic 4
+#define ol_external 8
 
 typedef struct BindListIndex BindListIndex;
 struct BindListIndex {
@@ -122,6 +123,17 @@ bool Inline_IsAutomatic(Binder *b) {
   for (p = saved_fns; p != NULL; p = cdr_(p))
     if (p == fn) return (p->outoflineflags & ol_automatic) != 0;
   return NO;
+}
+
+void Inline_NeedExternal(Binder *b) {
+  SavedFnList *p, *fn = (SavedFnList *)bindinline_(b);
+  for (p = saved_fns; p != NULL; p = cdr_(p))
+    if (p == fn) p->outoflineflags |= ol_external;
+}
+
+void Inline_Emitted(Binder *b) {
+  SavedFnList *fn = (SavedFnList *)bindinline_(b);
+  if (fn != NULL) fn->outoflineflags |= ol_emitted;
 }
 
 void Inline_Automatic(Binder *b, bool emitted) {
@@ -1188,9 +1200,17 @@ static void Inline_CompileOutOfLineCopy(Inline_SavedFn *fn) {
 
 void Inline_Tidy(void) {
   SavedFnList *p;
+  /* A C99 inline function declared extern after its definition must   */
+  /* also be defined externally (in the ordinary code area, so first).  */
+  for (p = saved_fns; p != NULL; p = cdr_(p))
+    if ((p->outoflineflags & (ol_external+ol_emitted)) == ol_external) {
+      p->outoflineflags |= ol_emitted;
+      p->fn.fndetails.xrflags = xr_code+xr_defext;
+      Inline_CompileOutOfLineCopy(&p->fn);
+    }
   for (;;) {
     bool emitted = NO;
-    for (p = saved_fns; p != NULL; p = cdr_(p))
+    for (p = saved_fns; p != NULL; p = cdr_(p)) {
       if ((p->outoflineflags & ol_used) && !(p->outoflineflags & ol_emitted)) {
         { char v[128+5];
 #ifdef TARGET_IS_THUMB
@@ -1207,6 +1227,7 @@ void Inline_Tidy(void) {
         p->outoflineflags |= ol_emitted;
         Inline_CompileOutOfLineCopy(&p->fn);
       }
+    }
     if (!emitted) break;
   }
 }

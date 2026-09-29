@@ -55,6 +55,8 @@ typedef enum AE_op {
     s_ustring,
     s_sstring,
 #endif
+    s_u16string,        /* C11's u"..."                                 */
+    s_u32string,        /* C11's U"..."                                 */
     s_wstring,
 /* s_binder heads binding records - see type Binder */
     s_binder,
@@ -393,6 +395,14 @@ typedef enum AE_op {
     s_false,
 #endif
 
+    s_alignof,          /* C11's _Alignof and _Alignas */
+    s_alignas,
+    s_generic,          /* C11's _Generic */
+    s_thread_local,     /* C11's _Thread_local */
+    s_typeofc23,        /* C23's typeof, typeof_unqual, nullptr and constexpr */
+    s_typeof_unqual,
+    s_nullptr,
+    s_constexpr,
     s_SPARE1,
     s_SPARE2,
 
@@ -417,11 +427,16 @@ typedef enum AE_op {
 
 #ifdef EXTENSION_UNSIGNED_STRINGS
 #  define case_s_any_string  case s_string: case s_wstring: \
+                             case s_u16string: case s_u32string: \
                              case s_ustring: case s_sstring:
 #else
-#  define case_s_any_string  case s_string: case s_wstring:
+#  define case_s_any_string  case s_string: case s_wstring: \
+                             case s_u16string: case s_u32string:
 #endif
 #define isstring_(op) (s_string<=(op) && (op)<=s_wstring)
+/* The size of the characters of a string of sort op.                   */
+#define stringunit_(op) ((op) == s_wstring ? sizeof_wchar : \
+                         (op) == s_u32string ? 4 : (op) == s_u16string ? 2 : 1)
 
 #endif
 

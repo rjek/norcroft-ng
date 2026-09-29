@@ -66,14 +66,13 @@
     /* maximum value for an object of type long int */
 #define ULONG_MAX 0xFFFFFFFFL
     /* maximum value for an object of type unsigned long int */
-#if __STDC_VERSION__ >= 199901
-#define LLONG_MIN (~0x7FFFFFFFFFFFFFFF)
+/* (long long is supported in every mode, so these always are.)        */
+#define LLONG_MIN (~0x7FFFFFFFFFFFFFFFLL)
     /* minimum value for an object of type long long int */
-#define LLONG_MAX 0x7FFFFFFFFFFFFFFF
+#define LLONG_MAX 0x7FFFFFFFFFFFFFFFLL
     /* maximum value for an object of type long long int */
-#define ULLONG_MAX 0xFFFFFFFFFFFFFFFF
+#define ULLONG_MAX 0xFFFFFFFFFFFFFFFFULL
     /* maximum value for an object of type unsigned long long int */
-#endif
 
 #endif
 

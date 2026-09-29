@@ -89,6 +89,9 @@
 /* __builtin_va_start makes a va_list that describes them.               */
 #define TARGET_HAS_SYSV_VA_START        1
 
+/* C11's _Thread_local, in .tdata, addressed by the initial-exec model.  */
+#define TARGET_HAS_TLS                  1
+
 /* Functions of up to this many jopcodes are inlined (see cg.c); -Otime  */
 /* doubles it, and -Ospace inlines none.  (i386 has too few registers.)  */
 #define TARGET_AUTO_INLINE              64

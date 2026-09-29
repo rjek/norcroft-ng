@@ -230,6 +230,26 @@ static Cmd *rd_block(enum blk_flavour f, bool real_block);
 static Cmd *rd_command(bool declposs);
 static DeclRhsList *rd_decllist(int declflag);
 static void rd_enumdecl(TagBinder *tb);
+
+/* Whether the members of struct or union a and b are the same (as for   */
+/* C23 redefinitions).                                                  */
+static bool same_tag_members(TagBinder *a, TagBinder *b)
+{   ClassMember *la = tagbindmems_(a), *lb = tagbindmems_(b);
+    if (tagbindsort(a) != tagbindsort(b)) return NO;
+    for (; la != NULL && lb != NULL; la = memcdr_(la), lb = memcdr_(lb))
+    {   bool bfa = isbitfield_type(memtype_(la)),
+             bfb = isbitfield_type(memtype_(lb));
+        if ((isgensym(memsv_(la)) ? !isgensym(memsv_(lb))
+                                  : memsv_(la) != memsv_(lb)) ||
+            bfa != bfb || (bfa && membits_(la) != membits_(lb)) ||
+            !equivtype(memtype_(la), memtype_(lb)))
+            return NO;
+    }
+    return la == NULL && lb == NULL;
+}
+static void rd_enum_fixed_type(void);
+static void set_enum_container(TagBinder *tb);
+static TypeExpr *enum_fixed_type;       /* (see rd_enum_fixed_type())   */
 static void rd_classdecl_(TagBinder *tb);
 static DeclRhsList *rd_decl2(int, SET_BITMAP);
 static TopDecl *rd_static_assert_decl(void);
@@ -541,6 +561,38 @@ void checkfor_delimiter_2ket(AEop s, AEop t)
 
 /* now to get on with it. */
 
+/* A string segment of chars of size unit (2 or 4, UTF-16 or UTF-32)    */
+/* with the characters of the ordinary (UTF-8) string segment s, of      */
+/* length len.                                                          */
+static StringSegList *widen_strseg(char const *s, int32 len, int32 unit)
+{   char *w = (char *)BindAlloc(2 * len * unit);
+    int32 i = 0, n = 0;
+    while (i < len)
+    {   unsigned32 c = (unsigned char)s[i++];
+        int more = (c & 0xe0) == 0xc0 ? 1 : (c & 0xf0) == 0xe0 ? 2 :
+                   (c & 0xf8) == 0xf0 ? 3 : 0;
+        if (more) c &= 0x3f >> more;
+        for (; more > 0 && i < len && (s[i] & 0xc0) == 0x80; more--)
+            c = (c << 6) | (s[i++] & 0x3f);
+        if (unit == 2 && c >= 0x10000)
+        {   unsigned32 hi = 0xd800 + ((c - 0x10000) >> 10);
+            c = 0xdc00 + ((c - 0x10000) & 0x3ff);
+            w[n] = (char)(target_lsbytefirst ? hi : hi >> 8);
+            w[n+1] = (char)(target_lsbytefirst ? hi >> 8 : hi);
+            n += 2;
+        }
+        {   int32 j;
+            for (j = 0; j < unit; j++)
+                w[n + (target_lsbytefirst ? j : unit-1-j)] =
+                    (char)(j < 4 ? c >> (8*j) : 0);
+            n += unit;
+        }
+    }
+    return (StringSegList *)binder_list3((StringSegList *)0, w, n);
+}
+
+static Symstr *funcword;        /* __func__, since C99 (see syn_init()) */
+
 Expr *rd_ANSIstring(void)
 {
     AEop op = curlex.sym;              /* s_string or s_wstring */
@@ -554,6 +606,24 @@ Expr *rd_ANSIstring(void)
             q = q->strsegcdr =
                 (StringSegList *) binder_list3((StringSegList *)0,
                     curlex.a1.s, curlex.a2.len);
+        /* Since C99, an ordinary and a wide (or C11's u or U) string   */
+        /* concatenate to one of the latter.                            */
+        else if (CStd(STD_C99) && stringunit_(op) > 1 &&
+                 stringunit_(curlex.sym) == 1)
+            q = q->strsegcdr = widen_strseg(curlex.a1.s, curlex.a2.len,
+                                            stringunit_(op));
+        else if (CStd(STD_C99) && stringunit_(op) == 1 &&
+                 stringunit_(curlex.sym) > 1)
+        {   StringSegList *w = NULL, **wq = &w;
+            for (; p != NULL; p = p->strsegcdr)
+            {   *wq = widen_strseg(p->strsegbase, p->strseglen,
+                                   stringunit_(curlex.sym));
+                wq = &(*wq)->strsegcdr;
+            }
+            *wq = q = (StringSegList *) binder_list3((StringSegList *)0,
+                          curlex.a1.s, curlex.a2.len);
+            p = w, op = curlex.sym;
+        }
         else
             cc_err(syn_err_mix_strings);
     return (Expr *)syn_list2(op, p);
@@ -675,6 +745,7 @@ static bool isexprstarter(AEop op)
         case s_lpar:    /* primary expression starters */
         case_s_any_string
         case s_integer: case s_true: case s_false: case s_floatcon: case s_int64con:
+        case s_nullptr:
         case s_identifier:
         case s_pseudoid:
         /* rd_cpp_name() swallowed s_coloncolon and s_operator. */
@@ -687,13 +758,16 @@ static bool isexprstarter(AEop op)
         case s_times: case s_plus: case s_minus:
         case s_plusplus: case s_minusminus:
         case s_bitnot: case s_boolnot: case s_sizeof:
+        case s_alignof: case s_generic:
                  return 1;
     }
 }
 
 /* Calling rd_type_name() must always precede isdeclstarter2_(). */
 #define isdeclstarter2_(curlex) \
-    (isdeclstarter_(curlex.sym) || \
+    (isdeclstarter_(curlex.sym) || curlex.sym == s_alignas || \
+     curlex.sym == s_thread_local || curlex.sym == s_typeofc23 || \
+     curlex.sym == s_typeof_unqual || curlex.sym == s_constexpr || \
      (curlex.sym & ~s_qualified) == s_identifier && curlex_typename != 0)
 
 /* Ditto for isdeclstarter3_() which is currently rather a placeholder. */
@@ -832,6 +906,8 @@ static Expr *rd_idexpr(int labelhack)
 
 /* rd_primary is called with rd_name having been called     */
 /* on curlex.sym.  (In rd_prefixexp() if not earlier.)                  */
+static Expr *rd_compoundlit(TypeExpr *t, bool isstatic);
+
 static Expr *rd_primaryexp(int labelhack)
 {
     Expr *a;
@@ -851,11 +927,18 @@ case s_lpar:
         if (isdeclstarter2_(curlex) && /* rd_declspec(stgclass) moans   */
             (!LanguageIsCPlusPlus || is_type_id()))
         {   TypeExpr *t;
+            bool clstatic = NO;
 /* The next line supports a keyword "__type" which is treated           */
 /* almost as whitespace here, but which is used by a few macros as a    */
 /* clue to the parser that certain parenthesised expressions are casts  */
 /* and not just arithmetic.  This (only) aids error recovery.           */
             if (curlex.sym == s_typestartsym) nextsym();
+            /* C23's storage classes for compound literals.              */
+            while (CStd(STD_C23) && (curlex.sym == s_static ||
+                   curlex.sym == s_constexpr || curlex.sym == s_register))
+            {   if (curlex.sym == s_static) clstatic = YES;
+                nextsym();
+            }
 /*
             if (LanguageIsCPlusPlus)
             {   if ((a = rd_cppcast()) != 0)
@@ -889,6 +972,10 @@ case s_lpar:
             }
             else
 #endif
+            if (curlex.sym == s_lbrace && CStd(STD_C99))
+            {   a = rd_compoundlit(t, clstatic);
+                break;
+            }
             return mkcast(s_cast, rd_prefixexp(NOLABEL), t);
         }
         a = rd_expr(PASTCOMMA);
@@ -896,6 +983,50 @@ case s_lpar:
         break;
 case_s_any_string   /* cope with ANSI juxtaposed concatenation */
         a = rd_ANSIstring();
+        break;
+case s_generic:     /* C11's _Generic ( expr , type : expr , ... )       */
+    {   TypeExpr *ct;
+        Expr *chosen = NULL, *deflt = NULL;
+        nextsym();
+        checkfor_ket(s_lpar);
+        /* The controlling expression's type after lvalue conversion     */
+        /* (arrays and functions to pointers, qualifiers lost, but no    */
+        /* promotion).                                                  */
+        ct = typeofexpr(rd_expr(UPTOCOMMA));
+        {   TypeExpr *pt = princtype(ct);
+            if (h0_(pt) == t_subscript) ct = ptrtotype_(typearg_(pt));
+            else if (h0_(pt) == t_fnap) ct = ptrtotype_(ct);
+        }
+        checkfor_ket(s_comma);
+        for (;;)
+        {   rd_type_name();
+            if (curlex.sym == s_default)
+            {   nextsym();
+                checkfor_ket(s_colon);
+                deflt = rd_expr(UPTOCOMMA);
+            }
+            else
+            {   TypeExpr *t = rd_typename(TYPENAME);
+                Expr *e;
+                checkfor_ket(s_colon);
+                e = rd_expr(UPTOCOMMA);
+                if (chosen == NULL && qualfree_equivtype(ct, t)) chosen = e;
+            }
+            if (curlex.sym != s_comma) break;
+            nextsym();
+        }
+        checkfor_ket(s_rpar);
+        if (chosen == NULL) chosen = deflt;
+        if (chosen == NULL)
+        {   cc_err(syn_err_generic, ct);
+            chosen = errornode;
+        }
+        a = chosen;
+        break;
+    }
+case s_invisible:   /* an expression already read (see lex_replay())    */
+        a = curlex.a1.e;
+        nextsym();
         break;
 #ifdef CPLUSPLUS
 case s_this:
@@ -976,11 +1107,25 @@ case s_identifier:
         if (pp_inhashif)
         {   /* the following warning is a good idea - consider:
                enum foo { a,b }; #if a==b ... */
-            if (!SuppressDB_Has(Suppress_PPUndefInIf))
-                cc_warn(syn_warn_hashif_undef, symname_(curlex.a1.sv));
-                /* @@@ - LDS 11-Nov-92: why the @@@? */
+            /* In C23, true and false are 1 and 0 here too.              */
+            if (CStd(STD_C23) && (StrEq(symname_(curlex.a1.sv), "true") ||
+                                  StrEq(symname_(curlex.a1.sv), "false")))
+                a = StrEq(symname_(curlex.a1.sv), "true") ? lit_one : lit_zero;
+            else
+            {   if (!SuppressDB_Has(Suppress_PPUndefInIf))
+                    cc_warn(syn_warn_hashif_undef, symname_(curlex.a1.sv));
+                    /* @@@ - LDS 11-Nov-92: why the @@@? */
+                a = lit_zero;
+            }
             nextsym();
-            a = lit_zero;
+        }
+        else if (curlex.a1.sv == funcword && currentfunction.symstr != NULL)
+        {   /* C99's __func__ is like a static const char array with the */
+            /* function's name, as is a string.                          */
+            char const *name = symname_(currentfunction.symstr);
+            a = (Expr *)syn_list2(s_string,
+                    binder_list3((StringSegList *)0, name, strlen(name)));
+            nextsym();
         }
         else
             a = rd_idexpr(labelhack);
@@ -996,6 +1141,14 @@ case s_int64con:
 case s_true:
 case s_false:
         a = ((curlex.sym & ~s_qualified) == s_true) ? lit_true : lit_false;
+        /* In C23, these are the bools 1 and 0.                         */
+        if (CStd(STD_C23))
+            a = mkintconst(primtype_(bitoftype_(s_bool)),
+                           (curlex.sym & ~s_qualified) == s_true, 0);
+        nextsym();
+        break;
+case s_nullptr:     /* C23's null pointer constant (a void * here)      */
+        a = mkintconst(te_voidptr, 0, 0);
         nextsym();
         break;
 case s_integer:            /* invent some more te_xxx for the next line? */
@@ -1178,6 +1331,18 @@ case s_minusminus:
 case s_bitnot:
 case s_boolnot: nextsym();
                 return mkunaryorop(op, rd_prefixexp(NOLABEL));
+case s_alignof:     /* C11's _Alignof(type) (or, as in gcc, expression) */
+        nextsym();
+        checkfor_ket(s_lpar);
+        rd_type_name();
+        {   TypeExpr *t;
+            if (isdeclstarter2_(curlex))
+                t = rd_typename(TYPENAME);
+            else
+                t = typeofexpr(rd_expr(PASTCOMMA));
+            checkfor_ket(s_rpar);
+            return mkintconst(te_size_t, alignoftype(t), 0);
+        }
 case s_typeof:  /* ncc extension keyword */
 case s_sizeof:
         nextsym();
@@ -1190,15 +1355,19 @@ case s_sizeof:
                 if (curlex.sym == s_typestartsym) nextsym();
                 t = rd_typename(TYPENAME);
                 checkfor_ket(s_rpar);
+                if (curlex.sym != s_lbrace || !CStd(STD_C99))
                 return mkintconst(
                     te_size_t,
                     op == s_sizeof ? cpp_sizeoftype(t) : codeoftype(t),
                     (Expr *)syn_list2(op == s_sizeof ? s_sizeoftype :
                                                        s_typeoftype,    t));
+                a = rd_postfix(rd_compoundlit(t, NO));  /* sizeof (t){...} */
             }
-            a = rd_expr(PASTCOMMA);
-            checkfor_ket(s_rpar);
-            a = rd_postfix(a);   /* for sizeof (f)() etc */
+            else
+            {   a = rd_expr(PASTCOMMA);
+                checkfor_ket(s_rpar);
+                a = rd_postfix(a);   /* for sizeof (f)() etc */
+            }
         }
         else a = rd_prefixexp(NOLABEL);
         return mkintconst(
@@ -1401,6 +1570,7 @@ static Expr *syn_allocexprtemps(Expr *e)
 /* it would otherwise be a nice simple recursive routine! */
 
 static int32 syn_initdepth;  /* only used by these fns and rd_declrhslist */
+static bool syn_scalar_compoundlit;     /* its braces are needed        */
 static Expr *syn_initpeek;
 
 /* these are clearly stubs of nice recursive calls! */
@@ -1441,7 +1611,7 @@ void syn_end_agg(int32 beganbrace)
                 result=syn_rdinit(0,0,4)
             );
         }
-        else if (beganbrace == 2)
+        else if (beganbrace == 2 && !syn_scalar_compoundlit)
             cc_warn(syn_warn_spurious_braces);
         nextsym();
         if (--syn_initdepth > 0 && curlex.sym != s_rbrace)
@@ -1531,6 +1701,433 @@ bool syn_canrdinit(void)
     return 1;
 }
 
+/* C99's designated initialisers.  An initialiser in braces is read     */
+/* whole into a list of InitItems, then (if it has any designators)     */
+/* its values are placed in a tree of InitNodes following the rules of  */
+/* [C99 6.7.8] (with the implicit braces of brace elision).  That is     */
+/* then turned back into symbols, now with all the braces and none of   */
+/* the designators, which are replayed (see lex_replay()) to vargen.c   */
+/* through syn_rdinit() and friends.  The designated member of a union  */
+/* that isn't the first is given as '.' <member> after its '{'.         */
+
+typedef struct Designator {
+    struct Designator *next;
+    Symstr *member;                     /* .member, or                  */
+    int32 index;                        /* [index] if member == NULL    */
+} Designator;
+
+typedef struct InitItem {
+    struct InitItem *next;
+    Designator *desig;
+    Expr *e;                            /* an expression, or            */
+    struct InitItem *sub;               /* a list in braces if !e       */
+    FileLine fl;
+} InitItem;
+
+typedef struct InitNode InitNode;
+typedef struct InitVal {
+    Expr *e;                            /* the whole value, or          */
+    InitNode *agg;                      /* its parts (or neither)       */
+} InitVal;
+
+#define INITPAGE 256
+struct InitNode {                       /* an aggregate being initialised */
+    TypeExpr *type;                     /* (princtype'd)                */
+    int32 n, npages;                    /* number of vals used, and pages */
+    InitVal **page;                     /* of INITPAGE vals             */
+    int32 active;                       /* union: the member initialised */
+};
+
+static bool init_designated;
+
+static InitItem *rd_initlist(void)
+{   InitItem *items = NULL, **tail = &items;
+    nextsym();                          /* skip '{'                     */
+    while (curlex.sym != s_rbrace && curlex.sym != s_eof &&
+           curlex.sym != s_semicolon)
+    {   InitItem *it = (InitItem *)SynAlloc(sizeof(InitItem));
+        Designator **dt = &it->desig;
+        memclr(it, sizeof(InitItem));
+        NoteCurrentFileLine(&it->fl);
+        while (curlex.sym == s_dot || curlex.sym == s_lbracket)
+        {   Designator *d = (Designator *)SynAlloc(sizeof(Designator));
+            memclr(d, sizeof(Designator));
+            init_designated = YES;
+            if (curlex.sym == s_dot)
+            {   nextsym();
+                if ((curlex.sym & ~s_qualified) != s_identifier)
+                    cc_err(syn_err_expected_member);
+                else
+                {   d->member = curlex.a1.sv;
+                    nextsym();
+                }
+            }
+            else
+            {   Expr *e;
+                nextsym();
+                e = optimise0(mkintegral(s_subscript, rd_expr(PASTCOMMA)));
+                if (e == NULL || h0_(e) != s_integer)
+                    cc_err(syn_err_designator_const);
+                else d->index = intval_(e);
+                checkfor_ket(s_rbracket);
+            }
+            *dt = d, dt = &d->next;
+        }
+        if (it->desig != NULL) checkfor_ket(s_assign);
+        if (curlex.sym == s_lbrace)
+            it->sub = rd_initlist();
+        else
+            it->e = rd_expr(UPTOCOMMA);
+        *tail = it, tail = &it->next;
+        if (curlex.sym != s_comma) break;
+        nextsym();
+    }
+    checkfor_ket(s_rbrace);
+    return items;
+}
+
+static bool init_isaggregate(TypeExpr *t)
+{   t = princtype(t);
+    return h0_(t) == t_subscript || isclasstype_(t);
+}
+
+/* The members of a struct or union that take initialisers (not unnamed */
+/* bit fields), as vargen.c's initsubstatic() sees them.                */
+static bool init_member(ClassMember *l)
+{   return is_datamember_(l) &&
+           !(isbitfield_type(memtype_(l)) && memsv_(l) == NULL);
+}
+
+static ClassMember *init_nthmember(TypeExpr *t, int32 i)
+{   ClassMember *l;
+    for (l = tagbindmems_(typespectagbind_(t)); l != NULL; l = memcdr_(l))
+        if (init_member(l) && i-- == 0) return l;
+    return NULL;
+}
+
+static InitNode *mk_initnode(TypeExpr *t)
+{   InitNode *a = (InitNode *)SynAlloc(sizeof(InitNode));
+    a->type = princtype(t);
+    a->n = a->npages = 0, a->page = NULL, a->active = -1;
+    return a;
+}
+
+/* The number of subobjects of a, or -1 if an array of unknown size.     */
+static int32 init_length(InitNode *a)
+{   if (h0_(a->type) == t_subscript)
+    {   Expr *size = typesubsize_(a->type);
+        return size == NULL ? -1 : evaluate(size);
+    }
+    {   int32 n = 0;
+        ClassMember *l;
+        for (l = tagbindmems_(typespectagbind_(a->type)); l != NULL;
+             l = memcdr_(l))
+            if (init_member(l)) n++;
+        return n;
+    }
+}
+
+static TypeExpr *init_childtype(InitNode *a, int32 i)
+{   return h0_(a->type) == t_subscript ? typearg_(a->type) :
+                                         memtype_(init_nthmember(a->type, i));
+}
+
+static InitVal *init_val(InitNode *a, int32 i)
+{   if (i / INITPAGE >= a->npages)
+    {   int32 np = a->npages == 0 ? 4 : a->npages;
+        InitVal **p;
+        while (np <= i / INITPAGE) np *= 2;
+        p = (InitVal **)SynAlloc(np * sizeof(InitVal *));
+        memclr(p, np * sizeof(InitVal *));
+        if (a->npages > 0) memcpy(p, a->page, a->npages * sizeof(InitVal *));
+        a->page = p, a->npages = np;
+    }
+    if (a->page[i / INITPAGE] == NULL)
+    {   InitVal *v = (InitVal *)SynAlloc(INITPAGE * sizeof(InitVal));
+        memclr(v, INITPAGE * sizeof(InitVal));
+        a->page[i / INITPAGE] = v;
+    }
+    return &a->page[i / INITPAGE][i % INITPAGE];
+}
+
+static InitVal *init_slot(InitNode *a, int32 i)
+{   if (isprimtypein_(a->type, bitoftype_(s_union)) && a->active != i)
+    {   /* Only one member of a union is initialised.                    */
+        if (a->active >= 0)
+        {   InitVal *old = init_val(a, a->active);
+            old->e = NULL, old->agg = NULL;
+        }
+        a->active = i;
+    }
+    if (i >= a->n) a->n = i+1;
+    return init_val(a, i);
+}
+
+/* Whether e initialises the whole of aggregate t (a string for an array */
+/* of characters, or a struct or union).                                 */
+static bool init_whole(TypeExpr *t, Expr *e)
+{   t = princtype(t);
+    if (h0_(t) == t_subscript)
+    {   TypeExpr *et = princtype(typearg_(t));
+        return (h0_(e) == s_string &&
+                isprimtypein_(et, bitoftype_(s_char))) ||
+               (h0_(e) == s_wstring &&
+                h0_(et) == s_typespec && !isprimtypein_(et, bitoftype_(s_char)));
+    }
+    return qualfree_equivtype(princtype(typeofexpr(e)), t);
+}
+
+#define INITDEPTH 32
+typedef struct { InitNode *agg; int32 idx; } InitFrame;
+
+static void fill_initnode(InitNode *root, InitItem *items);
+
+/* Find member m of struct or union node stk[*d].agg, perhaps within    */
+/* anonymous members, leaving stk[*d] its position.                     */
+static bool init_findmember(InitFrame *stk, int *d, Symstr *m)
+{   InitNode *a = stk[*d].agg;
+    ClassMember *l;
+    int32 i = 0;
+    for (l = tagbindmems_(typespectagbind_(a->type)); l != NULL; l = memcdr_(l))
+        if (init_member(l))
+        {   if (memsv_(l) == m)
+            {   stk[*d].idx = i;
+                return YES;
+            }
+            i++;
+        }
+    for (i = 0, l = tagbindmems_(typespectagbind_(a->type)); l != NULL;
+         l = memcdr_(l))
+        if (init_member(l))
+        {   if (isgensym(memsv_(l)) && isclasstype_(princtype(memtype_(l))) &&
+                *d+1 < INITDEPTH)       /* an anonymous struct or union */
+            {   InitVal *v;
+                int d0 = *d;
+                stk[d0].idx = i;
+                v = init_slot(a, i);
+                if (v->agg == NULL) v->agg = mk_initnode(memtype_(l)), v->e = NULL;
+                stk[++*d].agg = v->agg;
+                if (init_findmember(stk, d, m)) return YES;
+                *d = d0;
+            }
+            i++;
+        }
+    return NO;
+}
+
+/* Position stk (depth *d) as designator list dg says.                  */
+static bool init_designate(InitFrame *stk, int *d, Designator *dg)
+{   *d = 0;
+    for (;;)
+    {   InitNode *a = stk[*d].agg;
+        if (dg->member != NULL)
+        {   if (!isclasstype_(a->type) || !init_findmember(stk, d, dg->member))
+            {   cc_err(syn_err_designator);
+                return NO;
+            }
+        }
+        else
+        {   int32 len;
+            if (h0_(a->type) != t_subscript)
+            {   cc_err(syn_err_designator);
+                return NO;
+            }
+            len = init_length(a);
+            if (dg->index < 0 || (len >= 0 && dg->index >= len))
+            {   cc_err(syn_err_designator_index, (long)dg->index);
+                return NO;
+            }
+            stk[*d].idx = dg->index;
+        }
+        if ((dg = dg->next) == NULL) return YES;
+        {   InitNode *a = stk[*d].agg;
+            TypeExpr *t = init_childtype(a, stk[*d].idx);
+            InitVal *v;
+            if (!init_isaggregate(t) || *d+1 >= INITDEPTH)
+            {   cc_err(syn_err_designator);
+                return NO;
+            }
+            v = init_slot(a, stk[*d].idx);
+            if (v->agg == NULL) v->agg = mk_initnode(t), v->e = NULL;
+            stk[++*d].agg = v->agg;
+        }
+    }
+}
+
+/* Initialise the subobject at stk (depth *d) with it, going into       */
+/* aggregates (as if braced) as needed, then move on.                   */
+static void init_place(InitFrame *stk, int *d, InitItem *it)
+{   for (;;)
+    {   InitNode *a = stk[*d].agg;
+        int32 i = stk[*d].idx, len = init_length(a);
+        TypeExpr *t;
+        InitVal *v;
+        if (len >= 0 && i >= len)
+        {   if (*d == 0)
+            {   cc_err(syn_err_initialisers);
+                return;
+            }
+            --*d;
+            if (isprimtypein_(stk[*d].agg->type, bitoftype_(s_union)))
+                stk[*d].idx = init_length(stk[*d].agg);
+            else stk[*d].idx++;
+            continue;
+        }
+        t = init_childtype(a, i);
+        if (it->sub != NULL)
+        {   v = init_slot(a, i);
+            if (init_isaggregate(t))
+            {   v->agg = mk_initnode(t), v->e = NULL;
+                fill_initnode(v->agg, it->sub);
+            }
+            else if (it->sub->e != NULL && it->sub->desig == NULL)
+                v->e = it->sub->e, v->agg = NULL;
+            else cc_err(syn_err_initialisers1);
+            break;
+        }
+        if (!init_isaggregate(t) || init_whole(t, it->e))
+        {   v = init_slot(a, i);
+            v->e = it->e, v->agg = NULL;
+            break;
+        }
+        v = init_slot(a, i);            /* brace elision                */
+        if (v->agg == NULL) v->agg = mk_initnode(t), v->e = NULL;
+        if (*d+1 >= INITDEPTH) { cc_err(syn_err_designator); return; }
+        stk[++*d].agg = v->agg;
+        stk[*d].idx = 0;
+    }
+    if (isprimtypein_(stk[*d].agg->type, bitoftype_(s_union)))
+        stk[*d].idx = init_length(stk[*d].agg);
+    else stk[*d].idx++;
+}
+
+static void fill_initnode(InitNode *root, InitItem *items)
+{   InitFrame stk[INITDEPTH];
+    int d = 0;
+    stk[0].agg = root, stk[0].idx = 0;
+    for (; items != NULL; items = items->next)
+    {   if (items->desig != NULL && !init_designate(stk, &d, items->desig))
+            continue;
+        init_place(stk, &d, items);
+    }
+}
+
+typedef struct { LexReplay *first, *last; FileLine fl; } InitToks;
+
+static void init_tok(InitToks *p, AEop sym, Expr *e)
+{   SymInfo *t;
+    if (p->last == NULL || p->last->n == LEX_REPLAYCHUNK)
+    {   LexReplay *r = (LexReplay *)SynAlloc(sizeof(LexReplay));
+        r->next = NULL, r->n = 0;
+        if (p->last == NULL) p->first = r; else p->last->next = r;
+        p->last = r;
+    }
+    t = &p->last->tok[p->last->n++];
+    memclr(t, sizeof(SymInfo));
+    t->sym = sym;
+    t->a1.e = e;
+    t->fl = p->fl;
+}
+
+/* The symbols of an initialiser as read, without designators.         */
+static void init_toks_items(InitToks *p, InitItem *it)
+{   init_tok(p, s_lbrace, NULL);
+    for (; it != NULL; it = it->next)
+    {   p->fl = it->fl;
+        if (it->sub != NULL) init_toks_items(p, it->sub);
+        else init_tok(p, s_invisible, it->e);
+        if (it->next != NULL) init_tok(p, s_comma, NULL);
+    }
+    init_tok(p, s_rbrace, NULL);
+}
+
+static void init_toks_node(InitToks *p, InitNode *a)
+{   int32 i, first = 0;
+    init_tok(p, s_lbrace, NULL);
+    if (isprimtypein_(a->type, bitoftype_(s_union)))
+    {   if (a->active > 0)
+        {   init_tok(p, s_dot, NULL);
+            init_tok(p, s_identifier, NULL);
+            p->last->tok[p->last->n-1].a1.sv =
+                memsv_(init_nthmember(a->type, a->active));
+        }
+        first = a->active < 0 ? a->n : a->active;
+    }
+    for (i = first; i < a->n; i++)
+    {   InitVal *v = init_val(a, i);
+        if (i > first) init_tok(p, s_comma, NULL);
+        if (v->agg != NULL) init_toks_node(p, v->agg);
+        else if (v->e != NULL) init_tok(p, s_invisible, v->e);
+        else if (init_isaggregate(init_childtype(a, i)))
+        {   init_tok(p, s_lbrace, NULL);          /* not initialised      */
+            init_tok(p, s_invisible, lit_zero);
+            init_tok(p, s_rbrace, NULL);
+        }
+        else init_tok(p, s_invisible, lit_zero);
+    }
+    init_tok(p, s_rbrace, NULL);
+}
+
+void syn_prepare_init(TypeExpr *t)
+{   InitItem *items;
+    InitToks toks;
+    memclr(&toks, sizeof(toks));
+    NoteCurrentFileLine(&toks.fl);
+    init_designated = NO;
+    items = rd_initlist();
+    if (init_designated && init_isaggregate(t))
+    {   InitNode *root = mk_initnode(t);
+        fill_initnode(root, items);
+        init_toks_node(&toks, root);
+    }
+    else
+    {   if (init_designated) cc_err(syn_err_designator);
+        init_toks_items(&toks, items);
+    }
+    init_tok(&toks, s_nothing, NULL);       /* room for lex_replay()    */
+    lex_replay(toks.first);
+}
+
+/* C99's compound literal (t){ initialiser }, whose '{' is curlex: an   */
+/* unnamed object, static at file scope and otherwise automatic, lasting */
+/* to the end of the enclosing block, and initialised each time it is   */
+/* evaluated (so as the lvalue *(init, &object)).                       */
+static Expr *rd_compoundlit(TypeExpr *t, bool isstatic)
+{   int32 saved_depth = syn_initdepth;
+    Expr *saved_peek = syn_initpeek, *e;
+    DeclRhsList *d;
+    Binder *b;
+    if (isfntype(t) || (isvoidtype(t)))
+    {   cc_err(syn_err_designator);
+        t = te_int;
+    }
+    syn_initdepth = 0, syn_initpeek = 0;
+    syn_scalar_compoundlit = !init_isaggregate(t);
+    if (synscope == NULL || isstatic)
+    {   t = globalize_typeexpr(t);
+        b = global_mk_binder(0, gensymval(1), bitofstg_(s_static), t);
+        d = mkDeclRhsList(bindsym_(b), t, bitofstg_(s_static));
+        d->declbind = b;
+        NoteCurrentFileLine(&d->fileline);
+        (void)genstaticparts(d, NO, NO, NULL);
+        e = (Expr *)b;
+    }
+    else
+    {   b = gentempbinder(t);
+        d = mkDeclRhsList(bindsym_(b), t, bitofstg_(s_auto));
+        d->declbind = b;
+        NoteCurrentFileLine(&d->fileline);
+        synscope->car = mkSynBindList(synscope->car, b);
+        e = genstaticparts(d, NO, NO, NULL);
+        e = mkunary(s_content,
+                    e == NULL ? mkunary(s_addrof, (Expr *)b) :
+                    mkbinary(s_comma, e, mkunary(s_addrof, (Expr *)b)));
+    }
+    syn_initdepth = saved_depth, syn_initpeek = saved_peek;
+    syn_scalar_compoundlit = NO;
+    return e;
+}
+
 /* command reading routines... */
 #if 0
 static SynBindList *mkSynBindList_from_Decl(DeclRhsList *d, SynBindList *r)
@@ -1605,7 +2202,9 @@ static Cmd *rd_block(enum blk_flavour f, bool real_block)
     synscope->car = mkSynBindList_from_Decl(d, synscope->car);
 #endif
     while (curlex.sym != s_rbrace && curlex.sym != s_eof)
-    {   c = mkCmdList(c, rd_command(LanguageIsCPlusPlus != 0 && f != blk_SSTMT));
+    {   /* Since C99, declarations may follow statements.                */
+        c = mkCmdList(c, rd_command((LanguageIsCPlusPlus || CStd(STD_C99)) &&
+                                    f != blk_SSTMT));
         if (curlex.sym == s_nothing) nextsym();
     }
 
@@ -1784,6 +2383,9 @@ default:
             if (lab == 0)
                 return rd_command(declposs);  /* duplicate    */
             syn_setlab(lab, synscope);
+            /* Since C23, a label may end a block.                       */
+            if (curlex.sym == s_rbrace && CStd(STD_C23))
+                return mk_cmd_lab(s_colon, fl, lab, 0);
             return mk_cmd_lab(s_colon, fl, lab, rd_command(declposs));
         }
         /* @@@ perhaps we should check the ';' first */
@@ -1859,7 +2461,7 @@ case s_for|s_qualified:
         nextsym();
         checkfor_ket(s_lpar);
         push_exprtemp_scope();
-        if (LanguageIsCPlusPlus)
+        if (LanguageIsCPlusPlus || CStd(STD_C99))
         {  rd_type_name();
             if (isdeclstarter2_(curlex))
             {   DeclRhsList *d = rd_decl2(BLOCKHEAD, 0), *dp;
@@ -2186,7 +2788,81 @@ typedef struct DeclSpec {
 #define B_LINKAGE       16  /* C++ extern "x" ... (incl. extern "x" { ...)  */
 #define B_LINKBRACE     32  /* C++ extern "x" { ... special case            */
     int synflags;
+    int32 alignas;              /* C11's _Alignas, or 0                 */
+    bool tls;                   /* C11's _Thread_local                  */
+    bool constexpr;             /* C23's constexpr                      */
 } DeclSpec;
+
+/* t without its qualifiers (or those of its elements, if an array).    */
+static TypeExpr *unqualified_type(TypeExpr *t)
+{   TypeExpr *p = princtype(t);
+    switch (h0_(p))
+    {   case s_typespec:
+            return primtype2_(typespecmap_(p) & ~CVBITS, typespecbind_(p));
+        case t_content:
+            p = ptrtotype_(typearg_(p));
+            return p;
+        case t_subscript:
+            return mk_typeexpr1(t_subscript, unqualified_type(typearg_(p)),
+                                typesubsize_(p));
+        default:
+            return p;
+    }
+}
+
+/* C23's typeof ( type-name | expression ), or typeof_unqual, which has  */
+/* been read.                                                           */
+static TypeExpr *rd_typeof(AEop op)
+{   TypeExpr *t;
+    nextsym();
+    checkfor_ket(s_lpar);
+    rd_type_name();
+    if (isdeclstarter2_(curlex))
+        t = rd_typename(TYPENAME);
+    else
+        t = typeofexpr(rd_expr(PASTCOMMA));
+    checkfor_ket(s_rpar);
+    if (op == s_typeof_unqual) t = unqualified_type(t);
+    return t;
+}
+
+/* C11's _Alignas ( type-name | constant-expression ), returning the     */
+/* alignment (or 0).                                                    */
+static int32 rd_alignas(void)
+{   int32 a = 0;
+    nextsym();
+    checkfor_ket(s_lpar);
+    rd_type_name();
+    if (isdeclstarter2_(curlex))
+        a = alignoftype(rd_typename(TYPENAME));
+    else
+    {   Expr *e = optimise0(mkintegral(s_alignas, rd_expr(PASTCOMMA)));
+        if (e != NULL && h0_(e) == s_integer &&
+            intval_(e) >= 0 && (intval_(e) & (intval_(e) - 1)) == 0)
+            a = intval_(e);
+        else
+            cc_err(syn_err_alignas);
+    }
+    checkfor_ket(s_rpar);
+    return a;
+}
+
+/* The type of an object declared with type t and _Alignas(align).     */
+static TypeExpr *aligned_type(TypeExpr *t, int32 align, SET_BITMAP stg)
+{   Binder *b;
+    if (align <= alignoftype(t)) return t;
+    if ((stg & (bitofstg_(s_auto)|bitofstg_(s_register))) &&
+        align > alignof_toplevel_auto)
+    {   cc_err(syn_err_alignas_auto, (long)align);
+        return t;
+    }
+    /* A typedef of t whose alignment is align.                         */
+    t = globalize_typeexpr(t);
+    b = global_mk_binder(0, gensymval(1), bitofstg_(s_typedef), t);
+    attributes_(b) |= A_ALIGNAS;
+    bindaddr_(b) = align;
+    return primtype2_(bitoftype_(s_typedefname), b);
+}
 
 /* rd_declspec() reads a possibly optional list (as controlled by       */
 /* 'declflag') of declaration-specifiers.  (Dec 88 ANSI draft section   */
@@ -2228,8 +2904,41 @@ static DeclSpec rd_declspec(int declflag,
       /* opaque could be handled as a typebit but I don't since it's    */
       /* kept only in tag binders and the error handling is different   */
 
+    int32 alignas = 0;
+    bool tls = NO, constexpr = NO;
     for (;;)
     {   AEop s = curlex.sym;
+        if (s == s_alignas)             /* C11                           */
+        {   int32 a = rd_alignas();
+            if (a > alignas) alignas = a;
+            continue;
+        }
+        if (s == s_thread_local)        /* C11 (see also rd_declrhs())   */
+        {   if (tls) cc_rerr(syn_rerr_repeated_thread_local);
+            tls = YES;
+            nextsym();
+            continue;
+        }
+        if (s == s_constexpr)           /* C23: const, and see rd_declrhs() */
+        {   constexpr = YES;
+            typesseen |= bitoftype_(s_const);
+            nextsym();
+            continue;
+        }
+        if (s == s_typeofc23 || s == s_typeof_unqual)   /* C23           */
+        {   TypeExpr *t = rd_typeof(s);
+            if (typesseen & ~CVBITS)
+                cc_err(syn_err_typeclash, s_typedefname, typesseen & ~CVBITS);
+            else
+            {   /* as if a typedef of t were used                        */
+                b = global_mk_binder(0, gensymval(1), bitofstg_(s_typedef),
+                                     globalize_typeexpr(t));
+                typedefquals = qualifiersoftype(t);
+                typesseen |= bitoftype_(s_typedefname);
+                illtype |= illtypecombination[shiftoftype_(s_typedefname)];
+            }
+            continue;
+        }
         if (!isdeclstarter_(s))
         {   int scope_level = 0;
             /* A typedef may be possible, else break from loop...       */
@@ -2350,7 +3059,7 @@ static DeclSpec rd_declspec(int declflag,
                 nextsym();
 
             if (typebit & ENUMORCLASSBITS)
-            {   TagBinder *b2;
+            {   TagBinder *b2, *redef = NULL;
                 TagDefSort defining;
                 bool sawid = 0;
 /* Now, after "struct id" a ';' or '{' indicates a new definition at */
@@ -2369,6 +3078,9 @@ static DeclSpec rd_declspec(int declflag,
                     ds.stgval = stgval;
                     ds.fnaux.flags = 0;
                     ds.synflags = B_TYPESEEN;
+                    ds.alignas = 0;
+                    ds.tls = NO;
+                    ds.constexpr = NO;
                     return ds;
                 }
 
@@ -2384,6 +3096,7 @@ static DeclSpec rd_declspec(int declflag,
                     sv = curlex.a1.sv;
                     sawid = 1;
                     nextsym();
+                    if (s == s_enum) rd_enum_fixed_type();
                     defining = (curlex.sym == s_semicolon &&
                                 declflag & CONC_DECLARATOR &&
                                 !(stgseen & bitofstg_(s_friend))) ?
@@ -2393,7 +3106,8 @@ static DeclSpec rd_declspec(int declflag,
                                     (curlex.sym == s_comma ||
                                      curlex.sym == s_greater ||
                                      curlex.sym == s_semicolon)) ? TD_Decl :
-                               (curlex.sym == s_colon && s != s_enum ||
+                               (curlex.sym == s_colon && s != s_enum &&
+                                  !CStd(STD_C11) ||  /* (see _Generic)  */
                                 curlex.sym == s_lbrace) ?
                                    TD_ContentDef : TD_NotDef;
                     if (defining == TD_ContentDef) contentdefseen = YES;
@@ -2453,6 +3167,7 @@ than annoying.  Probably we don't understand the reason for it.
                     b2 = instate_tagbinding(sv, s, defining,
                              (declflag) == (TFORMAL|TEMPLATE) ? TEMPLATE : bind_scope,
                                             &newtag);
+                    redef = bind_take_redefined_tag();
 
                     if (defining == TD_ContentDef &&
                         (tagbindbits_(b2) & TB_TEMPLATE) &&
@@ -2553,13 +3268,20 @@ than annoying.  Probably we don't understand the reason for it.
                     if (s == s_enum) {
                         if (defining == TD_ContentDef)
                             synflags |= B_DECLMADE;
+                        else if (enum_fixed_type != NULL)
+                        {   /* C23's enum E : T; has a size, at least.   */
+                            set_enum_container(b2);
+                            enum_fixed_type = NULL;
+                            synflags |= B_DECLMADE;
+                        }
                         else if (!(tagbindbits_(b2) & TB_DEFD))
                             cc_rerr(syn_err_undef_enum, sv);
                     } else if (defining != TD_NotDef)
                         synflags |= B_DECLMADE;  /* police 'int;' error */
                 }
                 else
-                {   defining = TD_ContentDef;   /* anonymous class      */
+                {   if (s == s_enum) rd_enum_fixed_type();
+                    defining = TD_ContentDef;   /* anonymous class      */
                     b2 = instate_tagbinding(0, s, TD_ContentDef, bind_scope,
                                             &newtag);
                 }
@@ -2600,6 +3322,7 @@ than annoying.  Probably we don't understand the reason for it.
                     if (s==s_enum)
                     {   synflags |= B_DECLMADE;
                         rd_enumdecl(b2);
+                        enum_fixed_type = NULL;
                         checkfor_ket(s_rbrace);
                     }
                     else
@@ -2622,6 +3345,14 @@ than annoying.  Probably we don't understand the reason for it.
                             rd_classdecl_(b2);
                             access = old_access;
                             checkfor_ket(s_rbrace);
+                            /* A C23 redefinition must match (and is the   */
+                            /* original).                                 */
+                            if (redef != NULL)
+                            {   if (!same_tag_members(b2, redef))
+                                    cc_err(bind_err_duplicate_tag,
+                                           tagbindsort(redef), redef);
+                                b2 = redef;
+                            }
                             if (has_local_nested_class
                                 && (syn_pendingfns || syn_generatedfns))
                             {   Mark* mark = alloc_mark();
@@ -2686,6 +3417,9 @@ than annoying.  Probably we don't understand the reason for it.
             ds.stg = stgseen; ds.stgval = stgval;
             ds.fnaux.flags = 0;
             ds.synflags = synflags;
+            ds.alignas = alignas;
+            ds.tls = tls;
+            ds.constexpr = constexpr;
             return ds;
         }
     }
@@ -2799,6 +3533,9 @@ than annoying.  Probably we don't understand the reason for it.
         ds.fnaux.flags = auxseen,
         ds.fnaux.val = auxval,
         ds.synflags = synflags;
+        ds.alignas = alignas;
+        ds.tls = tls;
+        ds.constexpr = constexpr;
         return ds;
     }
 }
@@ -2876,6 +3613,13 @@ case s_lpar:
 case s_lbracket:
         if (declflag & CONVERSIONTYPE) return a;
         nextsym();
+        /* C99 permits 'static' and qualifiers in a parameter's (first) */
+        /* [], which only promise things or qualify the pointer that    */
+        /* the parameter is, so are ignored.                            */
+        if (CStd(STD_C99) && (declflag & (FORMAL|ARG_TYPES)))
+            while (curlex.sym == s_static || curlex.sym == s_const ||
+                   curlex.sym == s_volatile)
+                nextsym();
         {   Expr *e = 0;
             if (curlex.sym != s_rbracket)
             {   e = mkintegral(s_subscript, rd_expr(PASTCOMMA));
@@ -3085,7 +3829,8 @@ static TypeExpr *fault_incomplete_type_object(TypeExpr *tt, Symstr *name,
     }
     /* @@@ pick up more [] cases (like auto, but not extern) below?     */
     if (h0_(t) == t_subscript && typesubsize_(t) == 0 && member && !(stg & bitofstg_(s_static)))
-    {   if (!SuppressDB_Has(Suppress_ZeroArray)) {
+    {   /* Since C99, the last member may be such a flexible array.    */
+        if (!SuppressDB_Has(Suppress_ZeroArray) && !CStd(STD_C99)) {
             if (SuppressDB_Has(Suppress_MPWCompatible))
                 cc_warn(syn_rerr_open_member, name);
             else
@@ -3401,8 +4146,10 @@ static void defaultstorageclass(DeclRhsList *d, int declflag, Binder *mbind)
         else if (declflag & TOPLEVEL)
         {   if (isfntype(t))
             {   /* as of CD #2 inline no longer effects linkage */
+                /* (C99's inline does: see instate_declaration()).      */
                 if (mbind == 0)
-                    s |= bitofstg_(s_extern);
+                    s |= CStd(STD_C99) ? bitofstg_(s_extern)|b_implicitstg
+                                       : bitofstg_(s_extern);
                 else
                     s |= attributes_(bindparent_(mbind)) & A_NOLINKAGE ?
                         bitofstg_(s_static) : bitofstg_(s_extern);
@@ -3592,6 +4339,26 @@ static void rd_declrhs_exec(DeclRhsList *d, int declflag,
         /* @@@ we should probably kill gen_reftemps() here.             */
         return;
     }
+    /* C11's _Thread_local objects have static or external storage (so  */
+    /* need static or extern in a block), and are defined (initialised  */
+    /* to zero) unless explicitly extern.                               */
+    if (d->decltls)
+    {   if (isfntype(d->decltype) || (d->declstg & bitofstg_(s_typedef)) ||
+            !(d->declstg & (bitofstg_(s_static)|bitofstg_(s_extern))))
+        {   cc_err(syn_err_thread_local);
+            d->decltls = NO;
+        }
+#ifndef TARGET_HAS_TLS
+        else
+        {   cc_err(syn_err_thread_local_target);
+            d->decltls = NO;
+        }
+#endif
+        if (d->decltls && !haveinit &&
+            (d->declstg & (bitofstg_(s_extern)|b_implicitstg)) !=
+                bitofstg_(s_extern))
+            d->declstg &= ~b_undef;
+    }
     /* do the next line AFTER above type patching but before
        reading possible initialiser.  Save Binder in ->declbind.
        d->declstg now always has b_undef for statics & externs if there
@@ -3599,6 +4366,8 @@ static void rd_declrhs_exec(DeclRhsList *d, int declflag,
        statics not going in bss.
      */
     d->declbind = instate_declaration(d, declflag);
+    if (d->decltls && d->declbind != NULL)
+        attributes_(d->declbind) |= A_TLS;
     if (LanguageIsCPlusPlus)
     {
         if ((declflag == (TOPLEVEL|SPECIALIZE)) && (curlex_scope != NULL))
@@ -3657,6 +4426,21 @@ static void rd_declrhs_exec(DeclRhsList *d, int declflag,
           syn_initdepth = 0, syn_initpeek = 0, (void)syn_rdinit(0,0,4);
     syn_initdepth = (initflag == 1) ? 0 : -1;
     syn_initpeek = 0;
+    /* The value of a C23 constexpr object (of scalar type) is used as a  */
+    /* constant (see coerceunary()).                                    */
+    if (d->declconstexpr && initflag == 1 && curlex.sym != s_lbrace &&
+        d->declbind != NULL)
+    {   Expr *e = syn_rdinit(0, 0, 1);            /* (peek)              */
+        if (e != NULL && !init_isaggregate(d->decltype))
+        {   e = optimise0(mkcast(s_assign, e, d->decltype));
+            if (e != NULL && (h0_(e) == s_integer || h0_(e) == s_floatcon ||
+                              h0_(e) == s_int64con))
+                bindconst_(d->declbind) =
+                    (declflag & TOPLEVEL) ? globalize_expr(e) : e;
+            else
+                cc_err(syn_err_constexpr, d->declname);
+        }
+    }
     if (dyninit != NULL && declflag & TEMPLATE && declflag & TOPLEVEL &&
         d->declstg & (bitofstg_(s_extern)|b_implicitstg))
     {   /* file scope template static data member definition */
@@ -3720,6 +4504,8 @@ static DeclRhsList *rd_declrhslist(const DeclSpec *ds, const int declflag,
         Binder *mbind = 0;                   /* MEMFNBITS */
         NoteCurrentFileLine(&temp->fileline);
         declstgval_(temp) = ds->stgval;
+        temp->decltls = ds->tls;
+        temp->declconstexpr = ds->constexpr;
         if ((declflag & MEMBER) && curlex.sym == s_colon)
             temp->decltype = tt;        /* anon. bit field: 0 declaree  */
         /* anon unions only happen when a ';' follows -- invent a name. */
@@ -3755,6 +4541,28 @@ if (h0_(temp->decltype) == t_coloncolon) syserr("rd_declarator(::)");
             cppinit = declarator_init;
             mbind = declarator_mbinder;
             temp->declname = declarator_name;          /* 2nd result */
+            /* C23's  auto x = e;  declares x with e's type (after       */
+            /* lvalue conversion).  e is read here, and read again (see  */
+            /* lex_replay()) as the initialiser.                         */
+            if (CStd(STD_C23) && (ds->synflags & B_IMPLICITINT) &&
+                (ss & bitofstg_(s_auto)) && temp->decltype == tt &&
+                curlex.sym == s_assign)
+            {   InitToks toks;
+                Expr *e;
+                TypeExpr *t, *pt;
+                memclr(&toks, sizeof(toks));
+                NoteCurrentFileLine(&toks.fl);
+                nextsym();
+                e = rd_expr(UPTOCOMMA);
+                pt = princtype(t = typeofexpr(e));
+                t = h0_(pt) == t_subscript ? ptrtotype_(typearg_(pt)) :
+                    h0_(pt) == t_fnap ? ptrtotype_(t) : unqualified_type(t);
+                temp->decltype = mkqualifiedtype(t, qualifiersoftype(tt));
+                init_tok(&toks, s_assign, NULL);
+                init_tok(&toks, s_invisible, e);
+                init_tok(&toks, s_nothing, NULL);   /* (for lex_replay()) */
+                lex_replay(toks.first);
+            }
             if (!(declflag & TOPLEVEL) &&
                 (declarator_qscope != 0) &&
                 (!(declflag & MEMBER) ||
@@ -3778,6 +4586,10 @@ if (h0_(temp->decltype) == t_coloncolon) syserr("rd_declarator(::)");
             temp->decltype = fault_incomplete_type_object(
                  temp->decltype, temp->declname,
                  (declflag & MEMBER) != 0, temp->declstg);
+        if (ds->alignas != 0 && !(temp->declstg & bitofstg_(s_typedef)) &&
+            !isfntype(temp->decltype))
+            temp->decltype = aligned_type(temp->decltype, ds->alignas,
+                                          temp->declstg);
         if (h0_(temp->decltype) == t_fnap)       /* but NOT via typedef */
         {   if ((typeptrmap_(temp->decltype) & CVBITS) &&
                 ((mbind != 0) ?
@@ -4095,8 +4907,8 @@ static TopDecl *rd_fndef(DeclRhsList *d, int declflag, TagBinder *parent,
     for (fpe = fpdecllist; fpe != 0; fpe = fpe->declcdr)
     {   if (fpe->declname == 0)
         {
-            if (!LanguageIsCPlusPlus)
-                cc_rerr(syn_rerr_missing_formal); /* not an error in C++ */
+            if (!LanguageIsCPlusPlus && !CStd(STD_C23))
+                cc_rerr(syn_rerr_missing_formal); /* not in C++ or C23   */
             /* fixup so we can continue (@@@ soon alter callers)...      */
             fpe->declname = gensymval(1);
         }
@@ -4895,8 +5707,8 @@ static TopDecl *rd_static_assert_decl(void)
 static DeclRhsList *rd_formals_2(void)
 {   DeclRhsList *p,*q,*temp;
     if (curlex.sym == s_rpar)
-    {
-       if (LanguageIsCPlusPlus)
+    {  /* In C23 (as in C++), () is (void).                             */
+       if (LanguageIsCPlusPlus || CStd(STD_C23))
            syn_minformals = 0, syn_maxformals = 0, syn_oldeformals = 0;
        else
            syn_minformals = 0, syn_maxformals = 999, syn_oldeformals = 1;
@@ -4905,7 +5717,7 @@ static DeclRhsList *rd_formals_2(void)
     for (p = q = 0;;)
     {   if (curlex.sym == s_ellipsis)
         {
-            if (!LanguageIsCPlusPlus && p == 0)
+            if (!LanguageIsCPlusPlus && !CStd(STD_C23) && p == 0)
                 cc_rerr(syn_rerr_ellipsis_first);
             fault_incomplete_formals(p,0);
             nextsym();
@@ -5107,8 +5919,42 @@ static void rd_classdecl_(TagBinder *b)
    (only happens when sizeof_int < sizeof_long).
 */
 
+/* C23's fixed underlying type of an enum (enum E : T), which is read    */
+/* into enum_fixed_type (else NULL).                                    */
+static void rd_enum_fixed_type(void)
+{   enum_fixed_type = NULL;
+    if (curlex.sym == s_colon && CStd(STD_C23))
+    {   TypeExpr *t;
+        nextsym();
+        t = princtype(rd_typename(TYPENAME));
+        if (h0_(t) != s_typespec ||
+            !(typespecmap_(t) & (bitoftype_(s_int)|bitoftype_(s_char)|
+                                 bitoftype_(s_bool))))
+            cc_err(syn_err_enum_fixed, t);
+        else
+            enum_fixed_type = t;
+    }
+}
+
+/* The container (representation) of enum tb, with fixed type T.        */
+static void set_enum_container(TagBinder *tb)
+{   TypeExpr *t = enum_fixed_type;
+    SET_BITMAP m = typespecmap_(t);
+    int32 size = sizeoftype(t);
+    bool u = (m & bitoftype_(s_unsigned)) || (m & bitoftype_(s_bool)) ||
+             ((m & bitoftype_(s_char)) && !(m & bitoftype_(s_signed)) &&
+              !HasFeature(Feature_SignedChar));
+    SET_BITMAP container =
+        size == 1 ? (u ? TB_CONTAINER_UCHAR : TB_CONTAINER_CHAR) :
+        size == 2 ? (u ? TB_CONTAINER_USHORT : TB_CONTAINER_SHORT) :
+        size == 4 ? (u ? TB_CONTAINER_UINT : TB_CONTAINER_INT) :
+                    (u ? TB_CONTAINER_ULONG : TB_CONTAINER_LONG);
+    tagbindbits_(tb) = (tagbindbits_(tb) & ~TB_CONTAINER) | container;
+}
+
 static void rd_enumdecl(TagBinder *tb)
 {   TypeExpr *t = tagbindtype_(tb);
+    TypeExpr *fixed = enum_fixed_type;
     BindList *p = 0, *q = 0;
     int32 nextenumval = 0;
     int32 minval = 0, maxval = 0;
@@ -5210,7 +6056,9 @@ static void rd_enumdecl(TagBinder *tb)
         if (curlex.sym != s_comma) break;
         nextsym();
         if (curlex.sym == s_rbrace)
-        {   if (HasFeature(Feature_CFront) || HasFeature(Feature_PCC))
+        {   if (CStd(STD_C99))                 /* permitted since C99 */
+                ;
+            else if (HasFeature(Feature_CFront) || HasFeature(Feature_PCC))
                 cc_warn(syn_warn_extra_comma);
             else cc_rerr(syn_warn_extra_comma);
             break;
@@ -5242,6 +6090,11 @@ static void rd_enumdecl(TagBinder *tb)
                                                         TB_CONTAINER_INT;
         }
         tagbindbits_(tb) = (tagbindbits_(tb) & ~TB_CONTAINER) | container;
+    }
+    if (fixed != NULL)
+    {   enum_fixed_type = fixed;
+        set_enum_container(tb);
+        enum_fixed_type = NULL;
     }
 }
 
@@ -5431,6 +6284,7 @@ void syn_init(void)
         eof_done = NO;
     }
     curlex_member = NULL;
+    funcword = CStd(STD_C99) ? sym_insert_id("__func__") : NULL;
     xsyn_init();
 }
 
