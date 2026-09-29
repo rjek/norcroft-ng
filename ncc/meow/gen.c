@@ -169,17 +169,6 @@ static void out_shiftr(RealRegister rd, bool arith, bool left, bool rot,
                 : MEOW_ENCODE_SHR(rd, left, rot, rs));
 }
 
-/* ADDS and SUBS: rd op= operand, setting the flags */
-static void out_adds(bool sub, RealRegister rd, RealRegister rs)
-{
-    outHW(MEOW_ENCODE_ADDSR(rd, sub, rs));
-}
-
-static void out_addsi(bool sub, RealRegister rd, int32 imm)
-{
-    outHW(MEOW_ENCODE_ADDSI(rd, sub, (uint32_t)imm));
-}
-
 static void out_bitr(RealRegister rd, int op, bool inv, RealRegister rs)
 {
     outHW(MEOW_ENCODE_BITR(inv, rd, op, rs));
@@ -700,8 +689,7 @@ static void load_string(RealRegister rd, StringSegList *s, int32 extra)
 
 /* ---- copies that the next instruction can do without ---------------------- */
 
-static int skip_count;                  /* instructions already done */
-static bool skip_after_next;
+static bool skip_next, skip_after_next;
 
 /* rd = rs & (1 << b) followed by an equality test of rd against zero
  * where rd dies: TST rs, #bit does the lot. */
@@ -717,7 +705,7 @@ static bool test_bit(RealRegister rd, RealRegister rs, int32 mask)
     cond = n->op & Q_MASK & ~Q_UBIT;
     if (cond != Q_EQ && cond != Q_NE) return NO;
     out_tst(rs, bit);
-    skip_count = 1;
+    skip_next = YES;
     return YES;
 }
 
@@ -725,57 +713,13 @@ static bool test_bit(RealRegister rd, RealRegister rs, int32 mask)
  * and does not write it: the reader uses rs instead and the copy goes. */
 static RealRegister fwd_from = NoRegister, fwd_to;
 
-/* The condition of the branch that ends the block is to be replaced: a
- * peephole has left the flags from a different operation than the compare
- * the middle end wrote. */
-static int32 (*cond_map)(int32 q);
-
-/* CMP x, #0 after x -= 1, replaced by SUBS x, #1: the flags are those of
- * x - 1, so a signed test against zero moves by one and a test for zero
- * becomes the borrow. */
-static int32 cond_after_decrement(int32 q)
-{
-    switch (q & ~Q_UBIT) {
-    case Q_GT & ~Q_UBIT: return Q_GE;
-    case Q_LE & ~Q_UBIT: return Q_LT;
-    case Q_NE & ~Q_UBIT: case Q_HI & ~Q_UBIT: return Q_HS;
-    case Q_EQ & ~Q_UBIT: case Q_LS & ~Q_UBIT: return Q_LO;
-    default:
-        syserr("condition %lx after SUBS", (long)q);
-        return q;
-    }
-}
-
-/* CMP x, y after x += y, replaced by ADDS x, y: an unsigned x < y is the
- * carry out of the addition. */
-static int32 cond_after_add(int32 q)
-{
-    switch (q & ~Q_UBIT) {
-    case Q_LO & ~Q_UBIT: case Q_HI & ~Q_UBIT: return Q_HS;
-    case Q_HS & ~Q_UBIT: case Q_LS & ~Q_UBIT: return Q_LO;
-    default:
-        syserr("condition %lx after ADDS", (long)q);
-        return q;
-    }
-}
-
-/* Nothing but the flags of the compare n may reach the branch: n must end
- * the block, and its condition be one the caller can express. */
-static bool ends_block_testing(Icode const *n, RealRegister r, int32 k)
-{
-    return (n->op & J_TABLE_BITS) == J_CMPK && register_number(n->r2.r) == r &&
-           n->r3.i == k && n == cg_next_icode + cg_next_count - 1;
-}
-
 /* MOV rd, rs; rs = rd +- k; CMP rd, #c with rd dying there, which is what
  * "n-- > 0" comes out as: compare rs before stepping it and lose the
- * copy, or for the usual n - 1 against 0 let SUBS do both. Nothing
- * between sets or reads the flags. */
+ * copy. Nothing between sets or reads the flags. */
 static bool step_after_test(RealRegister rd, RealRegister rs)
 {
     Icode const *n = cg_next_icode, *n2;
     J_OPCODE nop;
-    int32 k, cond;
 
     if (n == NULL || cg_next_count < 2 || rd == rs) return NO;
     n2 = n + 1;
@@ -787,71 +731,10 @@ static bool step_after_test(RealRegister rd, RealRegister rs)
         register_number(n2->r2.r) != rd)
         return NO;
     if (n2->r3.i < -128 || n2->r3.i > 127) return NO;
-    k = nop == J_ADDK ? n->r3.i : -n->r3.i;
-    cond = n2->op & Q_MASK & ~Q_UBIT;
-    if (TARGET_FLAG_SETTING_ADD && k == -1 && ends_block_testing(n2, rd, 0) &&
-        (cond == (Q_GT & ~Q_UBIT) || cond == (Q_LE & ~Q_UBIT) ||
-         cond == (Q_NE & ~Q_UBIT) || cond == (Q_EQ & ~Q_UBIT) ||
-         cond == (Q_HI & ~Q_UBIT) || cond == (Q_LS & ~Q_UBIT))) {
-        out_addsi(YES, rs, 1);
-        cond_map = cond_after_decrement;
-        skip_count = 2;
-        return YES;
-    }
     out_cmpk(rs, n2->r3.i);
     fwd_from = rd;
     fwd_to = rs;
     skip_after_next = YES;
-    return YES;
-}
-
-/* r += k, with k up to 31 either way, then CMP r, #0 ending the block:
- * ADDS or SUBS sets the same N and Z, and the same V bar an overflow the
- * source could not have meant. */
-static bool step_sets_flags(RealRegister rd, RealRegister rs, int32 k)
-{
-    Icode const *n = cg_next_icode;
-    int32 cond;
-
-    if (!TARGET_FLAG_SETTING_ADD) return NO;
-    if (n == NULL || rd != rs || k == 0 || k < -31 || k > 31) return NO;
-    if (!ends_block_testing(n, rd, 0)) return NO;
-    cond = n->op & Q_MASK;
-    if (cond != Q_EQ && cond != Q_NE && cond != Q_UEQ && cond != Q_UNE &&
-        cond != Q_MI && cond != Q_PL && cond != Q_GE && cond != Q_LT &&
-        cond != Q_GT && cond != Q_LE)
-        return NO;
-    out_addsi(k < 0, rd, k < 0 ? -k : k);
-    skip_count = 1;
-    return YES;
-}
-
-/* x += y then an unsigned compare of x with y ending the block, which is
- * how C asks for the carry: ADDS gives it directly. */
-static bool add_sets_carry(RealRegister rd, RealRegister ra, RealRegister rb)
-{
-    Icode const *n = cg_next_icode;
-    RealRegister other;
-    int32 cond;
-
-    if (!TARGET_FLAG_SETTING_ADD || n == NULL) return NO;
-    if (rd == ra) other = rb;
-    else if (rd == rb) other = ra;
-    else return NO;
-    if ((n->op & J_TABLE_BITS) != J_CMPR || n != cg_next_icode + cg_next_count - 1)
-        return NO;
-    if ((n->op & Q_UBIT) == 0) return NO;
-    cond = n->op & Q_MASK;
-    if (register_number(n->r2.r) == rd && register_number(n->r3.r) == other) {
-        if (cond != Q_LO && cond != Q_HS) return NO;
-    } else if (register_number(n->r2.r) == other && register_number(n->r3.r) == rd) {
-        if (cond != Q_HI && cond != Q_LS) return NO;
-    } else {
-        return NO;
-    }
-    out_adds(NO, rd, other);
-    cond_map = cond_after_add;
-    skip_count = 1;
     return YES;
 }
 
@@ -992,16 +875,10 @@ static bool inline_ll(Symstr *name)
         return YES;
     }
     if (is_ll(name, sim.lladd)) {
-#if TARGET_FLAG_SETTING_ADD
-        out_adds(NO, R_A1, R_A1 + 2);
-        l = nextlabel();
-        branch_to(C_CC, l);
-#else
         out_add3(NO, R_A1, R_A1 + 2, 0);
         out_cmpr(R_A1, R_A1 + 2);      /* carry: the sum came out below an operand */
         l = nextlabel();
         branch_to(C_CS, l);
-#endif
         out_add8(NO, R_A1 + 1, 1);
         setlabel(l);
         out_add3(NO, R_A1 + 1, R_A1 + 3, 0);
@@ -1011,12 +888,8 @@ static bool inline_ll(Symstr *name)
         RealRegister alo = R_A1, ahi = R_A1 + 1, blo = R_A1 + 2, bhi = R_A1 + 3;
 
         if (is_ll(name, sim.llrsb)) {   /* b - a: compute into b's registers */
-#if TARGET_FLAG_SETTING_ADD
-            out_adds(YES, blo, alo);
-#else
             out_cmpr(blo, alo);
             out_add3(YES, blo, alo, 0);
-#endif
             out_add3(YES, bhi, ahi, 0);
             l = nextlabel();
             branch_to(C_CS, l);
@@ -1026,12 +899,8 @@ static bool inline_ll(Symstr *name)
             out_mov(ahi, bhi);
             return YES;
         }
-#if TARGET_FLAG_SETTING_ADD
-        out_adds(YES, alo, blo);
-#else
         out_cmpr(alo, blo);
         out_add3(YES, alo, blo, 0);
-#endif
         out_add3(YES, ahi, bhi, 0);
         l = nextlabel();
         branch_to(C_CS, l);
@@ -1042,16 +911,10 @@ static bool inline_ll(Symstr *name)
     if (is_ll(name, sim.llneg)) {
         out_bitr(R_A1, 0, NO, R_A1);
         out_bitr(R_A1 + 1, 0, NO, R_A1 + 1);
-#if TARGET_FLAG_SETTING_ADD
-        out_addsi(NO, R_A1, 1);
-        l = nextlabel();
-        branch_to(C_CC, l);
-#else
         out_add8(NO, R_A1, 1);
         out_cmpk(R_A1, 0);
         l = nextlabel();
         branch_to(C_NE, l);
-#endif
         out_add8(NO, R_A1 + 1, 1);
         setlabel(l);
         return YES;
@@ -1318,7 +1181,7 @@ static bool fuse_post(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off)
     if (n->r3.i != size && n->r3.i != -size) return NO;
     if (!store && rv == rb) return NO;
     mem_op(op, rv, rb, 0, n->r3.i == size ? 3 : 2);
-    skip_count = 1;
+    skip_next = YES;
     return YES;
 }
 
@@ -1337,7 +1200,7 @@ static bool fuse_pre(RealRegister rd, RealRegister rs, int32 k)
     rv = register_number(n->r1.r);
     if (writes_mem(n->op & J_TABLE_BITS) == 0 && rv == rd) return NO;
     mem_op(n->op & ~J_DEADBITS, rv, rd, 0, 1);
-    skip_count = 1;
+    skip_next = YES;
     return YES;
 }
 
@@ -1543,13 +1406,13 @@ static void show_instruction_1(const Icode *const ic)
     RealRegister mr = ic->r3.rr;
     int32 q = op & Q_MASK;
 
-    if (skip_count > 0) {
-        skip_count--;                   /* already done by an earlier one */
+    if (skip_next) {
+        skip_next = NO;                 /* already done by the previous one */
         return;
     }
     if (skip_after_next) {
         skip_after_next = NO;
-        skip_count = 1;
+        skip_next = YES;
     }
     if (fwd_from != NoRegister) {
         if (reads_r1(op1) && r1 == fwd_from) r1 = fwd_to;
@@ -1584,10 +1447,6 @@ case J_LABEL:
         setlabel((LabelNumber *)m);
         break;
 case J_B:
-        if (cond_map != NULL) {
-            q = cond_map(q);
-            cond_map = NULL;
-        }
         if ((LabelNumber *)m == RETLAB)
             return_to(cond_of_q(q));
         else
@@ -1622,11 +1481,9 @@ case J_NOTR:
         break;
 case J_ADDK:
         if (fuse_pre(r1, r2, mi)) break;
-        if (step_sets_flags(r1, r2, mi)) break;
         add_integer(r1, r2, mi);
         break;
 case J_SUBK:
-        if (step_sets_flags(r1, r2, -mi)) break;
         add_integer(r1, r2, -mi);
         break;
 case J_RSBK:
@@ -1649,10 +1506,7 @@ case J_EORK: bit_integer(3, r1, r2, mi); break;
 case J_MULK:
         multiply_integer(r1, r2, mi);
         break;
-case J_ADDR:
-        if (add_sets_carry(r1, r2, mr)) break;
-        rr_op('A', r1, r2, mr);
-        break;
+case J_ADDR: rr_op('A', r1, r2, mr); break;
 case J_SUBR: rr_op('S', r1, r2, mr); break;
 case J_ANDR: rr_op('&', r1, r2, mr); break;
 case J_ORRR: rr_op('|', r1, r2, mr); break;

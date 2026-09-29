@@ -124,14 +124,6 @@ int disass_meow(unsigned short w, unsigned long addr, char *buf,
         sprintf(buf, "%-8s %s, %s", "ASR", regnames[MEOW_ASRR_RD(w)],
                 regnames[MEOW_ASRR_RS(w)]);
         return 2;
-    case MEOW_ENC_ADDSI:
-        sprintf(buf, "%-8s %s, #%u", MEOW_ADDSI_SUB(w) != 0 ? "SUBS" : "ADDS",
-                regnames[MEOW_ADDSI_RD(w)], MEOW_ADDSI_IMM(w));
-        return 2;
-    case MEOW_ENC_ADDSR:
-        sprintf(buf, "%-8s %s, %s", MEOW_ADDSR_SUB(w) != 0 ? "SUBS" : "ADDS",
-                regnames[MEOW_ADDSR_RD(w)], regnames[MEOW_ADDSR_RS(w)]);
-        return 2;
     case MEOW_ENC_SPMEM:
         sprintf(buf, "%-8s %s, [sp, #%u]", MEOW_SPMEM_STORE(w) != 0 ? "STR" : "LDR",
                 regnames[MEOW_SPMEM_RV(w)], 4 * MEOW_SPMEM_IMM(w));

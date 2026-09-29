@@ -84,18 +84,6 @@ static const struct meow_field fields_ASRR[] = {
 	{ "rs", 0, 4, MEOW_FK_REG },
 };
 
-static const struct meow_field fields_ADDSI[] = {
-	{ "rd", 8, 4, MEOW_FK_REG },
-	{ "sub", 6, 1, MEOW_FK_FLAG },
-	{ "imm", 0, 5, MEOW_FK_UIMM },
-};
-
-static const struct meow_field fields_ADDSR[] = {
-	{ "rd", 8, 4, MEOW_FK_REG },
-	{ "sub", 6, 1, MEOW_FK_FLAG },
-	{ "rs", 0, 4, MEOW_FK_REG },
-};
-
 static const struct meow_field fields_SPMEM[] = {
 	{ "rv", 8, 4, MEOW_FK_REG },
 	{ "store", 5, 1, MEOW_FK_FLAG },
@@ -141,8 +129,6 @@ const struct meow_enc_desc meow_encs[MEOW_ENC_COUNT] = {
 	{ "SHR", "1010rrrrdR10ssss", 0xf030, 0xa020, 4, fields_SHR },
 	{ "ASRI", "1011rrrr000iiiii", 0xf0e0, 0xb000, 2, fields_ASRI },
 	{ "ASRR", "1011rrrr0010ssss", 0xf0f0, 0xb020, 2, fields_ASRR },
-	{ "ADDSI", "1011dddd1s0iiiii", 0xf0a0, 0xb080, 3, fields_ADDSI },
-	{ "ADDSR", "1011dddd1s10rrrr", 0xf0b0, 0xb0a0, 3, fields_ADDSR },
 	{ "SPMEM", "1011vvvv01Looooo", 0xf0c0, 0xb040, 3, fields_SPMEM },
 	{ "BITR", "110nddddoo00ssss", 0xe030, 0xc000, 4, fields_BITR },
 	{ "BITI", "110nddddoo1bbbbb", 0xe020, 0xc020, 4, fields_BITI },
