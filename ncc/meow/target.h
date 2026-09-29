@@ -131,7 +131,7 @@ extern int32 pcs_flags;
 
 #define R_P1            R_A1
 
-#define ALLOCATION_ORDER    {0,1,2,3,4,5,6,7,8,9,255}
+#define ALLOCATION_ORDER    {0,1,2,3,10,4,5,6,7,8,9,255}
 
 #ifndef alignof_double
 #  define alignof_double    4

@@ -380,8 +380,8 @@ static void multiply_integer(RealRegister rd, RealRegister rs, int32 k)
     }
     top = n - 1;                        /* always a +1 */
     if (rd == rs) {
-        out_mov(R_IP, rs);              /* rd already holds rs; keep a copy */
-        src = R_IP;
+        out_mov(R_IR, rs);              /* rd already holds rs; keep a copy */
+        src = R_IR;
     } else {
         out_mov(rd, src);
     }
@@ -1068,11 +1068,18 @@ static void routine_exit(void)
 
 /* ---- memory access ----------------------------------------------------- */
 
+/* The address is formed in ir: no other register is free, at being
+ * allocatable.  A big offset goes in by LDI first, then the base. */
 static RealRegister address_of(RealRegister rb, int32 off)
 {
     if (off == 0) return rb;
-    add_integer(R_IP, rb, off);
-    return R_IP;
+    if (off >= -255 && off <= 255) {
+        add_integer(R_IR, rb, off);
+    } else {
+        load_integer(R_IR, off);
+        out_add3(NO, R_IR, rb, 0);
+    }
+    return R_IR;
 }
 
 static void sign_extend(RealRegister r, int bits)
@@ -1255,7 +1262,7 @@ static void case_entry(LabelNumber *dest)
         if (!lab_isset_(dest)) return_pending = YES;
     }
     if (case_reg != NoRegister) {
-        RealRegister t = case_reg_dead ? case_reg : R_IP;
+        RealRegister t = case_reg_dead ? case_reg : R_IR;
 
         branch_to(C_CS, dest);
         if (t != case_reg) out_mov(t, case_reg);
@@ -1524,10 +1531,9 @@ case J_STRK: case J_STRBK: case J_STRWK:
         break;
 case J_LDRR: case J_LDRBR: case J_LDRWR:
 case J_STRR: case J_STRBR: case J_STRWR:
-        /* base + index: into whichever of them dies here, else into at */
-        if (mr == R_IP || r2 == R_IP) syserr(syserr_meow_reg, (long)mr, "index");
+        /* base + index: into whichever of them dies here, else into ir */
         {   bool store = writes_mem(op1) != 0;
-            RealRegister ra = R_IP;
+            RealRegister ra = R_IR;
 
             if ((ic->op & J_DEAD_R3) && !(store && r1 == mr)) {
                 out_add3(NO, mr, r2, 0);
@@ -1536,8 +1542,8 @@ case J_STRR: case J_STRBR: case J_STRWR:
                 out_add3(NO, r2, mr, 0);
                 ra = r2;
             } else {
-                out_mov(R_IP, r2);
-                out_add3(NO, R_IP, mr, 0);
+                out_mov(R_IR, r2);
+                out_add3(NO, R_IR, mr, 0);
             }
             mem_op(op, r1, ra, 0, 0);
         }
@@ -1605,7 +1611,6 @@ void mcdep_init(void)
 {
     codebuf_reinit2();
     avoidallocating(R_LR);
-    avoidallocating(R_IP);
     mustlitby = 0x10000000;
     mustbranchby = 0x10000000;
     current_procnum = 0;
