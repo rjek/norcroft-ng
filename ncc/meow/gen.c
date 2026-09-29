@@ -1250,6 +1250,11 @@ static void mem_op(J_OPCODE op, RealRegister rv, RealRegister rb, int32 off,
     int size = mem_size(op);
     RealRegister ra;
 
+    if (TARGET_SP_OFFSET_MEM && rb == R_SP && size == 4 && wb == 0 &&
+        !mem_packed(op) && off > 0 && off <= 124 && (off & 3) == 0) {
+        outHW(MEOW_ENCODE_SPMEM(rv, store, (uint32_t)off / 4));
+        return;
+    }
     ra = address_of(rb, off);
     if (mem_packed(op)) {
         /* packed data: a byte at a time, walking up with post-increment */

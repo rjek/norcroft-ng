@@ -22,6 +22,7 @@ enum meow_enc {
 	MEOW_ENC_ASRR,
 	MEOW_ENC_ADDSI,
 	MEOW_ENC_ADDSR,
+	MEOW_ENC_SPMEM,
 	MEOW_ENC_BITR,
 	MEOW_ENC_BITI,
 	MEOW_ENC_MEM,
@@ -349,6 +350,24 @@ static inline int32_t meow_sext(uint32_t v, unsigned w)
 	| (((uint32_t)(rd) & 0xfu) << 8) \
 	| (((uint32_t)(sub) & 0x1u) << 6) \
 	| (((uint32_t)(rs) & 0xfu) << 0)))
+
+/* SPMEM: 1011vvvv01Looooo */
+#define MEOW_SPMEM_MASK 0xf0c0
+#define MEOW_SPMEM_MATCH 0xb040
+#define MEOW_SPMEM_RV_SHIFT 8
+#define MEOW_SPMEM_RV_WIDTH 4
+#define MEOW_SPMEM_RV(w) (((w) >> 8) & 0xf)
+#define MEOW_SPMEM_STORE_SHIFT 5
+#define MEOW_SPMEM_STORE_WIDTH 1
+#define MEOW_SPMEM_STORE(w) (((w) >> 5) & 0x1)
+#define MEOW_SPMEM_IMM_SHIFT 0
+#define MEOW_SPMEM_IMM_WIDTH 5
+#define MEOW_SPMEM_IMM(w) (((w) >> 0) & 0x1f)
+#define MEOW_ENCODE_SPMEM(rv, store, imm) \
+	((uint16_t)(0xb040u \
+	| (((uint32_t)(rv) & 0xfu) << 8) \
+	| (((uint32_t)(store) & 0x1u) << 5) \
+	| (((uint32_t)(imm) & 0x1fu) << 0)))
 
 /* BITR: 110nddddoo00ssss */
 #define MEOW_BITR_MASK 0xe030

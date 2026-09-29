@@ -72,6 +72,8 @@
 #define TARGET_WANTS_STRENGTH_REDUCTION 1
 /* ADDS and SUBS exist: 0 measures the instruction set without them */
 #define TARGET_FLAG_SETTING_ADD 1
+/* LDR and STR of a word at an offset from sp exist: 0 measures without */
+#define TARGET_SP_OFFSET_MEM 1
 #define TARGET_STACK_MOVES_ONCE         1
 #define DO_NOT_EXPLOIT_REGISTERS_PRESERVED_BY_CALLEE 1
 #define TARGET_LACKS_RR_UNALIGNED_ACCESSES 1
